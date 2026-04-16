@@ -14,6 +14,14 @@ const (
 	ProfileOptimized ProfileName = "optimized"
 )
 
+type StrategyName string
+
+const (
+	StrategyNoOptimization StrategyName = "no_optimization"
+	StrategyStandardGBR    StrategyName = "standard_gbr"
+	StrategyDynamicQoS     StrategyName = "dynamic_qos"
+)
+
 type ProfileConfig struct {
 	RateMbps    float64 `json:"rate_mbps"`
 	LossPercent float64 `json:"loss_percent"`
@@ -22,33 +30,43 @@ type ProfileConfig struct {
 }
 
 type ScenarioConfig struct {
-	Clients     int           `json:"clients"`
-	UploadBytes int           `json:"upload_bytes"`
-	IntervalMS  int           `json:"interval_ms"`
-	DurationS   int           `json:"duration_s"`
-	RTTMS       int           `json:"rtt_ms"`
-	ServerPort  int           `json:"server_port"`
-	ServerIP    string        `json:"server_ip"`
-	RouterIP    string        `json:"router_ip"`
-	Public      ProfileConfig `json:"public"`
-	Optimized   ProfileConfig `json:"optimized"`
+	Strategy      StrategyName  `json:"strategy"`
+	Clients       int           `json:"clients"`
+	UploadBytes   int           `json:"upload_bytes"`
+	IntervalMS    int           `json:"interval_ms"`
+	DurationS     int           `json:"duration_s"`
+	RTTMS         int           `json:"rtt_ms"`
+	ServerPort    int           `json:"server_port"`
+	ServerIP      string        `json:"server_ip"`
+	RouterIP      string        `json:"router_ip"`
+	TotalRateMbps float64       `json:"total_rate_mbps"`
+	Public        ProfileConfig `json:"public"`
+	Optimized     ProfileConfig `json:"optimized"`
 }
 
 type ScenarioSetupRequest struct {
-	Clients     *int           `json:"clients"`
-	UploadBytes *int           `json:"upload_bytes"`
-	IntervalMS  *int           `json:"interval_ms"`
-	DurationS   *int           `json:"duration_s"`
-	RTTMS       *int           `json:"rtt_ms"`
-	ServerPort  *int           `json:"server_port"`
-	ServerIP    string         `json:"server_ip"`
-	RouterIP    string         `json:"router_ip"`
-	Public      *ProfileConfig `json:"public"`
-	Optimized   *ProfileConfig `json:"optimized"`
+	Strategy      StrategyName   `json:"strategy"`
+	Clients       *int           `json:"clients"`
+	UploadBytes   *int           `json:"upload_bytes"`
+	IntervalMS    *int           `json:"interval_ms"`
+	DurationS     *int           `json:"duration_s"`
+	RTTMS         *int           `json:"rtt_ms"`
+	ServerPort    *int           `json:"server_port"`
+	ServerIP      string         `json:"server_ip"`
+	RouterIP      string         `json:"router_ip"`
+	TotalRateMbps *float64       `json:"total_rate_mbps"`
+	Public        *ProfileConfig `json:"public"`
+	Optimized     *ProfileConfig `json:"optimized"`
 }
 
 type RunStartRequest struct {
 	DurationS *int `json:"duration_s"`
+}
+
+type ClientSpawnRequest struct {
+	Count   int         `json:"count"`
+	Profile ProfileName `json:"profile"`
+	Network ProfileName `json:"network"`
 }
 
 type ProfileUpdateRequest struct {
@@ -67,6 +85,13 @@ type ClientSample struct {
 	At        time.Time   `json:"at"`
 }
 
+type OutcomeCounts struct {
+	Attempts int `json:"attempts"`
+	Good     int `json:"good"`
+	Delayed  int `json:"delayed"`
+	Failed   int `json:"failed"`
+}
+
 type SampleStats struct {
 	Count     int     `json:"count"`
 	Successes int     `json:"successes"`
@@ -78,29 +103,42 @@ type SampleStats struct {
 }
 
 type ClientReport struct {
-	ClientID      string      `json:"client_id"`
-	ClientIP      string      `json:"client_ip"`
-	Profile       ProfileName `json:"profile"`
-	Running       bool        `json:"running"`
-	Samples       int         `json:"samples"`
-	Successes     int         `json:"successes"`
-	Errors        int         `json:"errors"`
-	MeanMS        float64     `json:"mean_ms"`
-	P95MS         float64     `json:"p95_ms"`
-	MaxMS         float64     `json:"max_ms"`
-	TotalMS       float64     `json:"total_ms"`
-	UploadedByte  int         `json:"uploaded_bytes"`
-	LastError     string      `json:"last_error,omitempty"`
-	LastLatencyMS float64     `json:"last_latency_ms,omitempty"`
-	LastSeen      *time.Time  `json:"last_seen,omitempty"`
+	ClientID      string        `json:"client_id"`
+	ClientIP      string        `json:"client_ip"`
+	Profile       ProfileName   `json:"profile"`
+	Running       bool          `json:"running"`
+	Attempts      int           `json:"attempts"`
+	Samples       int           `json:"samples"`
+	Successes     int           `json:"successes"`
+	Errors        int           `json:"errors"`
+	Outcomes      OutcomeCounts `json:"outcomes"`
+	MeanMS        float64       `json:"mean_ms"`
+	P95MS         float64       `json:"p95_ms"`
+	MaxMS         float64       `json:"max_ms"`
+	TotalMS       float64       `json:"total_ms"`
+	UploadedByte  int           `json:"uploaded_bytes"`
+	LastError     string        `json:"last_error,omitempty"`
+	LastLatencyMS float64       `json:"last_latency_ms,omitempty"`
+	LastSeen      *time.Time    `json:"last_seen,omitempty"`
 }
 
 type RunReport struct {
+	Running          bool           `json:"running"`
+	StartedAt        *time.Time     `json:"started_at,omitempty"`
+	FinishedAt       *time.Time     `json:"finished_at,omitempty"`
+	Strategy         StrategyName   `json:"strategy"`
+	ProtectedClients int            `json:"protected_clients"`
+	Scenario         ScenarioConfig `json:"scenario"`
+	Aggregate        SampleStats    `json:"aggregate"`
+	Outcomes         OutcomeCounts  `json:"outcomes"`
+	Clients          []ClientReport `json:"clients"`
+}
+
+type ClientsStatusResponse struct {
 	Running    bool           `json:"running"`
 	StartedAt  *time.Time     `json:"started_at,omitempty"`
 	FinishedAt *time.Time     `json:"finished_at,omitempty"`
 	Scenario   ScenarioConfig `json:"scenario"`
-	Aggregate  SampleStats    `json:"aggregate"`
 	Clients    []ClientReport `json:"clients"`
 }
 
@@ -109,9 +147,13 @@ type clientMetrics struct {
 	ClientIP    string
 	Profile     ProfileName
 	Running     bool
+	Attempts    int
 	Uploaded    int
 	Samples     []float64
 	Errors      int
+	Good        int
+	Delayed     int
+	Failed      int
 	LastError   string
 	LastLatency float64
 	LastSeen    *time.Time
@@ -141,6 +183,12 @@ func (m *MetricsStore) reset(cfg ScenarioConfig) {
 	m.clients = make(map[string]*clientMetrics, cfg.Clients)
 }
 
+func (m *MetricsStore) setScenario(cfg ScenarioConfig) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.scenario = cfg
+}
+
 func (m *MetricsStore) markStarted(t time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -160,6 +208,22 @@ func (m *MetricsStore) setClient(id, ip string, profile ProfileName) {
 	m.clients[id] = &clientMetrics{ClientID: id, ClientIP: ip, Profile: profile}
 }
 
+func (m *MetricsStore) setClientRunning(id string, running bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if c, ok := m.clients[id]; ok {
+		c.Running = running
+	}
+}
+
+func (m *MetricsStore) setAllClientsRunning(running bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, c := range m.clients {
+		c.Running = running
+	}
+}
+
 func (m *MetricsStore) setProfile(id string, profile ProfileName) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -176,15 +240,24 @@ func (m *MetricsStore) addSample(sample ClientSample) {
 		c = &clientMetrics{ClientID: sample.ClientID, ClientIP: sample.ClientIP, Profile: sample.Profile}
 		m.clients[sample.ClientID] = c
 	}
-	c.Profile = sample.Profile
+	c.Attempts++
 	c.Uploaded += sample.Bytes
 	c.LastSeen = &sample.At
 	if sample.Success {
 		c.Samples = append(c.Samples, sample.LatencyMS)
 		c.LastLatency = sample.LatencyMS
+		switch classifyLatency(sample.LatencyMS) {
+		case outcomeGood:
+			c.Good++
+		case outcomeDelayed:
+			c.Delayed++
+		default:
+			c.Failed++
+		}
 		return
 	}
 	c.Errors++
+	c.Failed++
 	c.LastError = sample.Error
 }
 
@@ -196,17 +269,29 @@ func (m *MetricsStore) report() RunReport {
 		Running:    m.finished == nil && m.started != nil,
 		StartedAt:  m.started,
 		FinishedAt: m.finished,
+		Strategy:   m.scenario.Strategy,
 		Scenario:   m.scenario,
 	}
 
 	var latencies []float64
 	var errors int
+	var outcomes OutcomeCounts
+	var protected int
 	for _, c := range m.clients {
 		latencies = append(latencies, c.Samples...)
 		errors += c.Errors
+		outcomes.Attempts += c.Attempts
+		outcomes.Good += c.Good
+		outcomes.Delayed += c.Delayed
+		outcomes.Failed += c.Failed
+		if c.Profile == ProfileOptimized {
+			protected++
+		}
 	}
 	report.Aggregate = summarize(latencies)
 	report.Aggregate.Errors = errors
+	report.Outcomes = outcomes
+	report.ProtectedClients = protected
 
 	report.Clients = make([]ClientReport, 0, len(m.clients))
 	for _, c := range m.clients {
@@ -215,13 +300,20 @@ func (m *MetricsStore) report() RunReport {
 		s := summarize(clientLatencies)
 		lastSeen := c.LastSeen
 		report.Clients = append(report.Clients, ClientReport{
-			ClientID:      c.ClientID,
-			ClientIP:      c.ClientIP,
-			Profile:       c.Profile,
-			Running:       report.Running,
-			Samples:       len(c.Samples),
-			Successes:     len(c.Samples),
-			Errors:        c.Errors,
+			ClientID:  c.ClientID,
+			ClientIP:  c.ClientIP,
+			Profile:   c.Profile,
+			Running:   c.Running,
+			Attempts:  c.Attempts,
+			Samples:   len(c.Samples),
+			Successes: len(c.Samples),
+			Errors:    c.Errors,
+			Outcomes: OutcomeCounts{
+				Attempts: c.Attempts,
+				Good:     c.Good,
+				Delayed:  c.Delayed,
+				Failed:   c.Failed,
+			},
 			MeanMS:        s.MeanMS,
 			P95MS:         s.P95MS,
 			MaxMS:         s.MaxMS,
@@ -289,4 +381,21 @@ func secondsFromMillis(ms int) time.Duration {
 
 func secondsFromDuration(s int) time.Duration {
 	return time.Duration(s) * time.Second
+}
+
+const (
+	outcomeGood    = "good"
+	outcomeDelayed = "delayed"
+	outcomeFailed  = "failed"
+)
+
+func classifyLatency(latencyMS float64) string {
+	switch {
+	case latencyMS < 100:
+		return outcomeGood
+	case latencyMS <= 200:
+		return outcomeDelayed
+	default:
+		return outcomeFailed
+	}
 }

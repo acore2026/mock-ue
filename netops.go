@@ -97,53 +97,63 @@ func configureServerLink(runtime *ScenarioRuntime) error {
 
 func configureClients(runtime *ScenarioRuntime) error {
 	for idx, client := range runtime.Clients {
-		local := localVethName(idx + 1)
-		router := client.RouterIF
-		if err := runCommand("ip", "link", "add", local, "type", "veth", "peer", "name", router); err != nil {
-			return err
-		}
-		if err := runCommand("ip", "link", "set", local, "netns", client.Namespace); err != nil {
-			return err
-		}
-		if err := runCommand("ip", "link", "set", router, "netns", runtime.RouterNS); err != nil {
-			return err
-		}
-		if err := runInNamespace(client.Namespace, "ip", "link", "set", local, "name", serverIface); err != nil {
-			return err
-		}
-		if err := runInNamespace(client.Namespace, "ip", "addr", "add", fmt.Sprintf("10.30.%d.2/24", idx+1), "dev", serverIface); err != nil {
-			return err
-		}
-		if err := runInNamespace(client.Namespace, "ip", "link", "set", serverIface, "up"); err != nil {
-			return err
-		}
-		if err := runInNamespace(client.Namespace, "ip", "route", "replace", "default", "via", clientRouterIPForIndex(idx+1)); err != nil {
-			return err
-		}
-		if err := runInNamespace(client.Namespace, "tc", "qdisc", "replace", "dev", serverIface, "root", "netem", "delay", rttDelay.String()); err != nil {
-			return err
-		}
-
-		if err := runInNamespace(runtime.RouterNS, "ip", "addr", "add", fmt.Sprintf("10.30.%d.1/24", idx+1), "dev", router); err != nil {
-			return err
-		}
-		if err := runInNamespace(runtime.RouterNS, "ip", "link", "set", router, "up"); err != nil {
+		if err := configureClient(runtime, client, idx+1); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+func configureClient(runtime *ScenarioRuntime, client ClientRuntime, index int) error {
+	local := localVethName(index)
+	router := client.RouterIF
+	if err := runCommand("ip", "link", "add", local, "type", "veth", "peer", "name", router); err != nil {
+		return err
+	}
+	if err := runCommand("ip", "link", "set", local, "netns", client.Namespace); err != nil {
+		return err
+	}
+	if err := runCommand("ip", "link", "set", router, "netns", runtime.RouterNS); err != nil {
+		return err
+	}
+	if err := runInNamespace(client.Namespace, "ip", "link", "set", local, "name", serverIface); err != nil {
+		return err
+	}
+	if err := runInNamespace(client.Namespace, "ip", "addr", "add", fmt.Sprintf("10.30.%d.2/24", index), "dev", serverIface); err != nil {
+		return err
+	}
+	if err := runInNamespace(client.Namespace, "ip", "link", "set", serverIface, "up"); err != nil {
+		return err
+	}
+	if err := runInNamespace(client.Namespace, "ip", "route", "replace", "default", "via", clientRouterIPForIndex(index)); err != nil {
+		return err
+	}
+	if err := runInNamespace(client.Namespace, "tc", "qdisc", "replace", "dev", serverIface, "root", "netem", "delay", rttDelay.String()); err != nil {
+		return err
+	}
+
+	if err := runInNamespace(runtime.RouterNS, "ip", "addr", "add", fmt.Sprintf("10.30.%d.1/24", index), "dev", router); err != nil {
+		return err
+	}
+	if err := runInNamespace(runtime.RouterNS, "ip", "link", "set", router, "up"); err != nil {
+		return err
+	}
+	return nil
+}
+
 func configureRouter(runtime *ScenarioRuntime, cfg ScenarioConfig) error {
-	maxRate := math.Max(cfg.Public.RateMbps, cfg.Optimized.RateMbps)
-	if maxRate <= 0 {
-		maxRate = 50
+	totalRate := cfg.TotalRateMbps
+	if totalRate <= 0 {
+		totalRate = math.Max(cfg.Public.RateMbps, cfg.Optimized.RateMbps)
+	}
+	if totalRate <= 0 {
+		totalRate = 100
 	}
 
 	if err := runInNamespace(runtime.RouterNS, "tc", "qdisc", "replace", "dev", routerServerIface, "root", "handle", "1:", "htb", "default", "20"); err != nil {
 		return err
 	}
-	if err := runInNamespace(runtime.RouterNS, "tc", "class", "replace", "dev", routerServerIface, "parent", "1:", "classid", "1:1", "htb", "rate", mbps(maxRate), "ceil", mbps(maxRate), "prio", "1"); err != nil {
+	if err := runInNamespace(runtime.RouterNS, "tc", "class", "replace", "dev", routerServerIface, "parent", "1:", "classid", "1:1", "htb", "rate", mbps(totalRate), "ceil", mbps(totalRate), "prio", "1"); err != nil {
 		return err
 	}
 	if err := runInNamespace(runtime.RouterNS, "tc", "class", "replace", "dev", routerServerIface, "parent", "1:1", "classid", "1:10", "htb", "rate", mbps(cfg.Public.RateMbps), "ceil", mbps(cfg.Public.RateMbps), "prio", strconv.Itoa(cfg.Public.Priority)); err != nil {
