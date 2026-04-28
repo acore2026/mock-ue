@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   CircleDot,
   Gauge,
+  Smartphone,
   Play,
   Plus,
   Radio,
@@ -64,6 +65,9 @@ type HistoryPoint = {
   goodPct: number
   degradedPct: number
   highPct: number
+  prioritized: number
+  temporary: number
+  capacity: number
   latencies: number[]
 }
 
@@ -84,11 +88,9 @@ function App() {
       <motion.div className="page-frame" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.28 }}>
         <DashboardHeader
           draftStrategy={liveState.draftStrategy}
-          appliedStrategy={liveState.state?.strategy}
           state={liveState.state}
           loading={liveState.loading}
           pending={liveState.pending}
-          streamStatus={liveState.streamStatus}
           onDraftStrategyChange={liveState.setDraftStrategy}
           onPrepare={liveState.prepareSession}
           onRun={liveState.startRun}
@@ -107,19 +109,15 @@ function App() {
           ) : null}
         </AnimatePresence>
 
-        <KpiStrip state={liveState.state} streamStatus={liveState.streamStatus} />
-        <InsightStrip state={liveState.state} />
-
-        <main className="dashboard-main">
-          <AnalyticsColumn state={liveState.state} historyPoints={liveState.historyPoints} />
-          <DeviceBoard
-            state={liveState.state}
-            resultByID={liveState.resultByID}
-            latencyHistoryByID={liveState.latencyHistoryByID}
-            completionTicks={liveState.completionTicks}
-          />
-        </main>
-
+        <StatusBar state={liveState.state} streamStatus={liveState.streamStatus} lastUpdateAt={liveState.lastUpdateAt} />
+        <KpiStrip state={liveState.state} historyPoints={liveState.historyPoints} />
+        <DashboardBody
+          state={liveState.state}
+          historyPoints={liveState.historyPoints}
+          resultByID={liveState.resultByID}
+          latencyHistoryByID={liveState.latencyHistoryByID}
+        />
+        <StrategyComparison state={liveState.state} historyPoints={liveState.historyPoints} />
       </motion.div>
     </div>
   )
@@ -132,11 +130,10 @@ function useDemoLiveState() {
   const [error, setError] = useState<string | null>(null)
   const [streamStatus, setStreamStatus] = useState<DemoStreamStatus>('connecting')
   const [pending, setPending] = useState<PendingActions>(initialPendingState)
-  const [completionTicks, setCompletionTicks] = useState<Record<string, number>>({})
   const [resultByID, setResultByID] = useState<Record<string, UploadResult>>({})
   const [latencyHistoryByID, setLatencyHistoryByID] = useState<Record<string, number[]>>({})
   const [historyPoints, setHistoryPoints] = useState<HistoryPoint[]>([])
-  const animationTimersRef = useRef<number[]>([])
+  const [lastUpdateAt, setLastUpdateAt] = useState<Date | null>(null)
   const recordedAttemptsRef = useRef<Record<string, number>>({})
 
   function setActionPending(action: PendingAction, value: boolean) {
@@ -149,18 +146,15 @@ function useDemoLiveState() {
   }
 
   function resetSandboxState() {
-    for (const timerID of animationTimersRef.current) {
-      window.clearTimeout(timerID)
-    }
-    animationTimersRef.current = []
     recordedAttemptsRef.current = {}
-    setCompletionTicks({})
     setResultByID({})
     setLatencyHistoryByID({})
     setHistoryPoints([])
   }
 
   function applyState(nextState: DemoState | null) {
+    setLastUpdateAt(new Date())
+
     if (!nextState) {
       setState(null)
       setDraftStrategy('no_optimization')
@@ -233,14 +227,6 @@ function useDemoLiveState() {
 
   useEffect(() => subscribeDemoStream(onStreamEvent, setStreamStatus), [])
 
-  useEffect(() => {
-    return () => {
-      for (const timerID of animationTimersRef.current) {
-        window.clearTimeout(timerID)
-      }
-    }
-  }, [])
-
   function handleStreamEvent(event: DemoStreamEvent) {
     if (event.type === 'error') {
       if (event.message === 'missing_demo_session') {
@@ -278,16 +264,6 @@ function useDemoLiveState() {
           return next
         })
       })
-
-      for (const item of freshItems) {
-        const timerID = window.setTimeout(() => {
-          setCompletionTicks((current) => ({
-            ...current,
-            [item.id]: (current[item.id] ?? 0) + 1,
-          }))
-        }, sporadicAnimationDelay(item))
-        animationTimersRef.current.push(timerID)
-      }
     }
 
     if (event.state) {
@@ -301,11 +277,11 @@ function useDemoLiveState() {
   }
 
   return {
-    completionTicks,
     draftStrategy,
     error,
     historyPoints,
     latencyHistoryByID,
+    lastUpdateAt,
     loading,
     pending,
     resultByID,
@@ -324,11 +300,9 @@ function useDemoLiveState() {
 
 function DashboardHeader({
   draftStrategy,
-  appliedStrategy,
   state,
   loading,
   pending,
-  streamStatus,
   onDraftStrategyChange,
   onPrepare,
   onRun,
@@ -338,11 +312,9 @@ function DashboardHeader({
   onRefresh,
 }: {
   draftStrategy: StrategyName
-  appliedStrategy?: StrategyName
   state: DemoState | null
   loading: boolean
   pending: PendingActions
-  streamStatus: DemoStreamStatus
   onDraftStrategyChange: (value: StrategyName) => void
   onPrepare: () => Promise<void>
   onRun: () => Promise<void>
@@ -351,9 +323,6 @@ function DashboardHeader({
   onReset: () => Promise<void>
   onRefresh: () => Promise<void>
 }) {
-  const activeStrategy = state?.strategy ?? appliedStrategy ?? draftStrategy
-  const streamConnected = streamStatus === 'connected'
-
   return (
     <header className="dashboard-header">
       <div className="brand-lockup">
@@ -390,100 +359,247 @@ function DashboardHeader({
           <ActionButton label={loading ? 'Syncing' : 'Refresh'} pendingLabel="Refreshing" onClick={onRefresh} disabled={pending.refresh} pending={pending.refresh} icon={<RefreshCcw size={14} />} iconOnly />
         </div>
       </div>
+    </header>
+  )
+}
 
-      <div className="run-strip">
+function StatusBar({
+  state,
+  streamStatus,
+  lastUpdateAt,
+}: {
+  state: DemoState | null
+  streamStatus: DemoStreamStatus
+  lastUpdateAt: Date | null
+}) {
+  const [nowMS, setNowMS] = useState(() => Date.now())
+  const streamConnected = streamStatus === 'connected'
+  const activeStrategy = state?.strategy ?? 'no_optimization'
+
+  useEffect(() => {
+    if (!state?.running) {
+      return
+    }
+    const timerID = window.setInterval(() => setNowMS(Date.now()), 1000)
+    return () => window.clearInterval(timerID)
+  }, [state?.running])
+
+  return (
+    <section className="status-bar" aria-label="Run status">
+      <div className="status-stream">
         <span className={`live-dot ${streamConnected ? 'is-live' : ''}`} />
-        <span>Live Stream {streamConnected ? 'Connected' : streamStatus}</span>
+        <strong>Live Stream {streamConnected ? 'Connected' : streamStatus}</strong>
         <span>{streamConnected ? 'Live' : '--'}</span>
+      </div>
+
+      <div className="status-meta">
         <span>Run State:</span>
         <strong className={state?.running ? 'state-running' : ''}>{state?.running ? 'RUNNING' : state ? 'READY' : 'NO SESSION'}</strong>
         <span>Strategy:</span>
         <strong>{labelForStrategy(activeStrategy)}</strong>
+        <span>Elapsed:</span>
+        <strong>{formatElapsed(state, nowMS)}</strong>
+        <span>Last Update:</span>
+        <strong>{formatTime(lastUpdateAt)}</strong>
       </div>
-    </header>
+    </section>
   )
 }
 
 function KpiStrip({
   state,
-  streamStatus,
+  historyPoints,
 }: {
   state: DemoState | null
-  streamStatus: DemoStreamStatus
+  historyPoints: HistoryPoint[]
 }) {
   const activeUsers = state?.counters.active_users ?? 0
-  const goodPercent = activeUsers > 0 && state ? Math.round((state.counters.good_users / activeUsers) * 100) : null
-  const highPercent = activeUsers > 0 && state ? Math.round((state.counters.failed_users / activeUsers) * 100) : null
-  const activeStrategy = state?.strategy ?? 'no_optimization'
+  const latestPoint = historyPoints.at(-1)
+  const goodPercent = state ? goodLatencyPercent(state) : null
+  const p50 = state ? p50Latency(state) ?? latestPoint?.p50 ?? null : null
+  const prioritized = state ? prioritizedCount(state) : 0
+  const temporary = state?.counters.temporary_grants ?? 0
+  const reserved = state?.counters.protected_users ?? 0
+  const activeSeries = historyPoints.map((point) => point.active)
+  const goodSeries = historyPoints.map((point) => point.goodPct)
+  const p50Series = historyPoints.map((point) => point.p50)
+  const prioritizedSeries = historyPoints.map((point) => point.prioritized)
+  const temporarySeries = historyPoints.map((point) => point.temporary)
+  const capacitySeries = historyPoints.map((point) => point.capacity)
 
   return (
     <section className="kpi-strip" aria-label="Run summary metrics">
-      <ActiveStrategyCard strategy={activeStrategy} />
-      <MetricCard icon={<Activity size={18} />} label="Active UEs" value={state ? activeUsers : '--'} detail={state ? `${state.counters.planned_users} planned` : 'No session'} tone="blue" />
-      <MetricCard icon={<CheckCircle2 size={18} />} label="Good Latency" value={goodPercent === null ? '--' : `${goodPercent}%`} detail="Good (<=150ms)" tone="green" />
-      <MetricCard icon={<AlertTriangle size={18} />} label="High Latency" value={highPercent === null ? '--' : `${highPercent}%`} detail="High (>300ms)" tone="orange" />
-      <MetricCard icon={<Gauge size={18} />} label="Shared Capacity" value={state ? formatMbps(state.bandwidth.total_rate_mbps) : '--'} detail={`Stream ${streamStatus}`} tone="blue" />
+      <MetricCard
+        icon={<Activity size={18} />}
+        label="Active UEs"
+        value={state ? activeUsers : '--'}
+        detail={state ? `${activeUsers} active / ${state.users.length} total` : 'No session'}
+        tone="blue"
+        visual={<MetricMiniBars samples={activeSeries} tone="blue" />}
+      />
+      <MetricCard
+        icon={<CheckCircle2 size={18} />}
+        label="Good Latency"
+        value={goodPercent === null ? '--' : `${goodPercent}%`}
+        detail={state ? `${state.counters.good_users} UEs <=150ms` : 'Good <=150ms'}
+        tone="green"
+        visual={<MetricMiniBars samples={goodSeries} tone="green" />}
+      />
+      <MetricCard
+        icon={<Gauge size={18} />}
+        label="P50 Upload Latency"
+        value={formatLatency(p50)}
+        detail="Rolling median"
+        tone="purple"
+        visual={<MetricMiniBars samples={p50Series} tone="purple" />}
+      />
+      <MetricCard
+        icon={<Shield size={18} />}
+        label="Prioritized UEs"
+        value={state ? prioritized : '--'}
+        detail={state ? `${reserved} Reserved / ${temporary} Temp` : 'Reserved / Temp'}
+        tone="purple"
+        visual={<MetricMiniBars samples={prioritizedSeries} tone="purple" />}
+      />
+      <MetricCard
+        icon={<Sparkles size={18} />}
+        label="Temporary Grants"
+        value={state ? temporary : '--'}
+        detail="Dynamic allocation"
+        tone="orange"
+        visual={<MetricMiniBars samples={temporarySeries} tone="orange" />}
+      />
+      <MetricCard
+        icon={<Radio size={18} />}
+        label="Shared Capacity"
+        value={state ? formatMbps(state.bandwidth.total_rate_mbps) : '--'}
+        detail="Uplink (Shared)"
+        tone="blue"
+        visual={<MetricMiniBars samples={capacitySeries} tone="blue" />}
+      />
     </section>
   )
 }
 
-function ActiveStrategyCard({
-  strategy,
+function MetricCard({
+  icon,
+  label,
+  value,
+  detail,
+  tone,
+  visual,
 }: {
-  strategy: StrategyName
+  icon: ReactNode
+  label: string
+  value: ReactNode
+  detail: string
+  tone: string
+  visual?: ReactNode
 }) {
-  const scenario = scenarioStyle(strategy)
-
-  return (
-    <article className={`scenario-summary-card tone-${scenario.tone}`}>
-      <div className="comparison-head">
-        <div className="comparison-icon">{scenario.icon}</div>
-        <div>
-          <h3>{labelForStrategy(strategy)}</h3>
-          <p>{scenario.short}</p>
-        </div>
-        <span className="active-badge">Active</span>
-      </div>
-      <p className="scenario-message">{scenario.expectation}</p>
-    </article>
-  )
-}
-
-function MetricCard({ icon, label, value, detail, tone }: { icon: ReactNode; label: string; value: ReactNode; detail: string; tone: string }) {
   return (
     <article className={`metric-card tone-${tone}`}>
-      <div className="metric-icon">{icon}</div>
-      <div>
-        <span>{label}</span>
-        <strong>{value}</strong>
-        <small>{detail}</small>
+      <div className="metric-main">
+        <div className="metric-icon">{icon}</div>
+        <div className="metric-copy">
+          <span>{label}</span>
+          <strong>{value}</strong>
+          <small>{detail}</small>
+        </div>
       </div>
+      {visual ? <div className="metric-visual">{visual}</div> : null}
     </article>
   )
 }
 
-function InsightStrip({ state }: { state: DemoState | null }) {
-  if (!state) {
-    return (
-      <section className="insight-strip">
-        <strong>No live run yet.</strong>
-        <span>Prepare a strategy to show how shared uplink capacity affects UE latency.</span>
-      </section>
-    )
-  }
-
-  const activeUsers = state.counters.active_users
-  const goodPercent = activeUsers > 0 ? Math.round((state.counters.good_users / activeUsers) * 100) : 0
-  const highPercent = activeUsers > 0 ? Math.round((state.counters.failed_users / activeUsers) * 100) : 0
-  const status = state.running ? 'is keeping' : 'is ready for'
+function MetricMiniBars({ samples, tone }: { samples: number[]; tone: string }) {
+  const displaySamples = samples.slice(-18)
+  const max = Math.max(...displaySamples, 1)
 
   return (
-    <section className="insight-strip">
-      <strong>{labelForStrategy(state.strategy)}</strong>
-      <span>
-        {status} {goodPercent}% of {activeUsers} active UEs in Good (&lt;=150ms), with {highPercent}% in High (&gt;300ms).
-      </span>
+    <div className={`metric-mini-bars tone-${tone}`} aria-hidden="true">
+      {Array.from({ length: 18 }).map((_, index) => {
+        const value = displaySamples[index - (18 - displaySamples.length)] ?? 0
+        const height = value > 0 ? Math.max(12, Math.round((value / max) * 100)) : 6
+        return <span key={index} style={{ height: `${height}%` }} />
+      })}
+    </div>
+  )
+}
+
+function DashboardBody({
+  state,
+  historyPoints,
+  resultByID,
+  latencyHistoryByID,
+}: {
+  state: DemoState | null
+  historyPoints: HistoryPoint[]
+  resultByID: Record<string, UploadResult>
+  latencyHistoryByID: Record<string, number[]>
+}) {
+  return (
+    <main className="dashboard-body">
+      <AnalyticsColumn state={state} historyPoints={historyPoints} />
+      <DeviceBoard
+        state={state}
+        resultByID={resultByID}
+        latencyHistoryByID={latencyHistoryByID}
+      />
+    </main>
+  )
+}
+
+function StrategyComparison({
+  state,
+  historyPoints,
+}: {
+  state: DemoState | null
+  historyPoints: HistoryPoint[]
+}) {
+  const activeStrategy = state?.strategy ?? 'no_optimization'
+  const activeUsers = state?.counters.active_users ?? 0
+  const latestPoint = historyPoints.at(-1)
+  const activeGood = activeUsers > 0 && state ? goodLatencyPercent(state) : null
+  const activeFailed = activeUsers > 0 && state ? failedPercent(state) : null
+
+  return (
+    <section className="strategy-comparison" aria-label="Strategy comparison">
+      {strategies.map((strategy) => {
+        const scenario = scenarioStyle(strategy.value)
+        const isActive = strategy.value === activeStrategy
+        return (
+          <article key={strategy.value} className={`comparison-card tone-${scenario.tone} ${isActive ? 'is-active' : ''}`}>
+            <div className="comparison-head">
+              <div className="comparison-icon">{scenario.icon}</div>
+              <div>
+                <h3>{strategy.label}</h3>
+                <p>{scenario.short}</p>
+              </div>
+              {isActive ? <span className="active-badge">Active</span> : null}
+            </div>
+
+            <SparkBars samples={isActive ? latestPoint?.latencies ?? [] : []} />
+
+            <div className="comparison-metrics">
+              <MetricInline label="Good" value={isActive && activeGood !== null ? `${activeGood}%` : '--'} tone="green" />
+              <MetricInline label="P50 Latency" value={isActive && latestPoint ? formatLatency(latestPoint.p50) : '--'} tone="purple" />
+              <MetricInline label="Failed" value={isActive && activeFailed !== null ? `${activeFailed}%` : '--'} tone="red" />
+            </div>
+
+            <p className="comparison-note">{scenario.expectation}</p>
+          </article>
+        )
+      })}
     </section>
+  )
+}
+
+function MetricInline({ label, value, tone }: { label: string; value: ReactNode; tone: string }) {
+  return (
+    <div className={`metric-inline tone-${tone}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
   )
 }
 
@@ -598,19 +714,16 @@ const DeviceBoard = memo(function DeviceBoard({
   state,
   resultByID,
   latencyHistoryByID,
-  completionTicks,
 }: {
   state: DemoState | null
   resultByID: Record<string, UploadResult>
   latencyHistoryByID: Record<string, number[]>
-  completionTicks: Record<string, number>
 }) {
   const [filter, setFilter] = useState<BoardFilter>('all')
   const [sortMode, setSortMode] = useState<BoardSort>('ue')
   const deferredUsers = useDeferredValue(state?.users ?? [])
   const deferredResultByID = useDeferredValue(resultByID)
   const deferredLatencyHistoryByID = useDeferredValue(latencyHistoryByID)
-  const deferredCompletionTicks = useDeferredValue(completionTicks)
   const filterCounts = useMemo(() => boardFilterCounts(deferredUsers), [deferredUsers])
   const visibleUsers = useMemo(
     () => sortUsers(filterUsers(deferredUsers, filter), sortMode, deferredResultByID),
@@ -654,7 +767,6 @@ const DeviceBoard = memo(function DeviceBoard({
                 user={user}
                 latestResult={deferredResultByID[user.client_id]}
                 latencyHistory={deferredLatencyHistoryByID[user.client_id] ?? []}
-                completionTick={deferredCompletionTicks[user.client_id] ?? 0}
                 index={index}
               />
             ))}
@@ -673,32 +785,33 @@ const DeviceCard = memo(function DeviceCard({
   user,
   latestResult,
   latencyHistory,
-  completionTick,
   index,
 }: {
   user: DemoUser
   latestResult?: UploadResult
   latencyHistory: number[]
-  completionTick: number
   index: number
 }) {
   const displayStatus = latestResult ? classifyResultStatus(latestResult) : user.status
   const displayLatencyMS = latestResult?.latency_ms ?? user.last_latency_ms ?? 0
-  const treatment = treatmentLabel(user)
+  const treatment = treatmentMeta(user)
 
   return (
     <motion.article
-      className={`ue-card status-${displayStatus} treatment-${user.treatment} ${user.active ? '' : 'is-waiting'} ${completionTick > 0 ? 'is-complete' : ''}`}
+      className={`ue-card status-${displayStatus} treatment-${user.treatment} ${user.active ? '' : 'is-waiting'}`}
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: 0.05 + (index % 12) * 0.015 }}
     >
       <div className="ue-card-top">
-        <div>
+        <div className="ue-card-id">
           <span className="ue-status-dot" />
-          <strong>{ueLabel(user)}</strong>
+          <Smartphone className="ue-phone-icon" size={13} />
+          <div className="ue-card-name">
+            <strong>{ueLabel(user)}</strong>
+            <span>{user.client_ip}</span>
+          </div>
         </div>
-        <span className="treatment-pill">{treatment}</span>
       </div>
 
       <div className="ue-card-body">
@@ -715,7 +828,6 @@ const DeviceCard = memo(function DeviceCard({
           <svg className="progress-ring" viewBox="0 0 44 44">
             <circle className="ring-track" cx="22" cy="22" r="17.5" pathLength="1" />
             <circle
-              key={`${user.client_id}-${completionTick}`}
               className="ring-value"
               cx="22"
               cy="22"
@@ -724,10 +836,15 @@ const DeviceCard = memo(function DeviceCard({
               strokeLinecap="round"
             />
           </svg>
-          <span key={`flash-${user.client_id}-${completionTick}`} className="completion-flash" />
           <span className="dot-core" />
         </div>
-        <strong>{user.active ? formatLatency(displayLatencyMS) : 'Waiting'}</strong>
+        <div className="ue-card-metrics">
+          <strong>{user.active ? formatLatency(displayLatencyMS) : 'Waiting'}</strong>
+          <span className={`ue-treatment-badge treatment-${user.treatment}`} title={treatment.label}>
+            {treatment.icon}
+            <span>{treatment.short}</span>
+          </span>
+        </div>
       </div>
 
       <SparkBars samples={latencyHistory} />
@@ -838,31 +955,58 @@ function labelForSort(sortMode: BoardSort) {
     case 'latency':
       return 'Latency'
     case 'ue':
-      return 'IMSI'
+      return 'UE'
     case 'status':
       return 'Status'
   }
 }
 
 function ueLabel(user: DemoUser) {
-  return `IMSI ${String(user.index).padStart(5, '0')}`
+  return `imsi-208930${String(user.index).padStart(9, '0')}`
 }
 
-function treatmentLabel(user: DemoUser) {
+function treatmentMeta(user: DemoUser): { short: string; label: string; icon: ReactNode } {
   if (!user.active) {
-    return 'Wait'
+    return { short: 'WAIT', label: 'Waiting', icon: null }
   }
   if (user.treatment === 'temporary_grant') {
-    return 'Temp'
+    return { short: 'TEMP', label: 'Temporary grant', icon: <Sparkles size={10} /> }
   }
   if (user.treatment === 'reserved') {
-    return 'GBR'
+    return { short: 'GBR', label: 'Reserved GBR', icon: <Shield size={10} /> }
   }
-  return 'Public'
+  return { short: 'PUB', label: 'Public best effort', icon: null }
 }
 
 function formatMbps(value: number) {
   return `${value.toFixed(0)} Mbps`
+}
+
+function formatTime(value: Date | null) {
+  if (!value) {
+    return '--:--:--'
+  }
+  return value.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  })
+}
+
+function formatElapsed(state: DemoState | null, nowMS: number) {
+  if (!state) {
+    return '--:--:--'
+  }
+  const startMS = Date.parse(state.prepared_at)
+  if (!Number.isFinite(startMS)) {
+    return '00:00:00'
+  }
+  const elapsedSeconds = state.running ? Math.max(0, Math.floor((nowMS - startMS) / 1000)) : 0
+  const hours = Math.floor(elapsedSeconds / 3600)
+  const minutes = Math.floor((elapsedSeconds % 3600) / 60)
+  const seconds = elapsedSeconds % 60
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
 }
 
 function formatLatency(value: number | null | undefined) {
@@ -891,6 +1035,26 @@ function formatChartTooltip(value: unknown, name: unknown): [ReactNode, string] 
   return [Number.isFinite(numeric) ? formatLatency(numeric) : String(value), String(name)]
 }
 
+function goodLatencyPercent(state: DemoState) {
+  return state.counters.active_users > 0 ? Math.round((state.counters.good_users / state.counters.active_users) * 100) : 0
+}
+
+function failedPercent(state: DemoState) {
+  return state.counters.active_users > 0 ? Math.round((state.counters.failed_users / state.counters.active_users) * 100) : 0
+}
+
+function prioritizedCount(state: DemoState) {
+  return state.counters.protected_users + state.counters.temporary_grants
+}
+
+function p50Latency(state: DemoState) {
+  const latencies = state.users
+    .filter((user) => user.active)
+    .map((user) => user.last_latency_ms ?? 0)
+    .filter((value) => value > 0)
+  return percentile(latencies, 0.5)
+}
+
 function percentile(samples: number[], fraction: number) {
   if (samples.length === 0) {
     return null
@@ -916,6 +1080,9 @@ function makeHistoryPoint(state: DemoState, tick: number): HistoryPoint {
     goodPct: percentOfActive(state.counters.good_users),
     degradedPct: percentOfActive(state.counters.delayed_users),
     highPct: percentOfActive(state.counters.failed_users),
+    prioritized: prioritizedCount(state),
+    temporary: state.counters.temporary_grants,
+    capacity: state.bandwidth.total_rate_mbps,
     latencies: stateLatencies,
   }
 }
@@ -1050,20 +1217,6 @@ function statusColor(status: DemoUserStatus) {
     default:
       return '#9ca3af'
   }
-}
-
-function sporadicAnimationDelay(result: UploadResult) {
-  const batchWindowMS = 1000
-  const minDelayMS = 40
-  const maxDelayMS = 940
-  const seed = `${result.id}:${result.attempt}:${result.at}:${result.phase_ms}`
-  let hash = 2166136261
-  for (let index = 0; index < seed.length; index += 1) {
-    hash ^= seed.charCodeAt(index)
-    hash = Math.imul(hash, 16777619)
-  }
-  const normalized = ((hash >>> 0) % batchWindowMS) / batchWindowMS
-  return Math.round(minDelayMS + normalized * (maxDelayMS - minDelayMS))
 }
 
 function scenarioStyle(strategy: StrategyName) {
