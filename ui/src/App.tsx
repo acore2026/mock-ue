@@ -1,4 +1,4 @@
-import { memo, startTransition, useDeferredValue, useEffect, useEffectEvent, useRef, useState } from 'react'
+import { memo, startTransition, useDeferredValue, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
@@ -6,7 +6,6 @@ import {
   AlertTriangle,
   CheckCircle2,
   CircleDot,
-  Clock3,
   Gauge,
   Play,
   Plus,
@@ -16,8 +15,6 @@ import {
   Shield,
   Sparkles,
   StopCircle,
-  Wifi,
-  XCircle,
 } from 'lucide-react'
 import {
   fetchDemoState,
@@ -28,18 +25,47 @@ import {
   stopDemoRun,
   subscribeDemoStream,
 } from './api'
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  ComposedChart,
+  Line,
+  ReferenceArea,
+  ReferenceLine,
+  ResponsiveContainer,
+  Scatter,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
 import type { DemoStreamStatus } from './api'
 import type { DemoState, DemoStreamEvent, DemoUser, DemoUserStatus, StrategyName, UploadResult } from './types'
 import './App.css'
 
-const strategies: Array<{ label: string; value: StrategyName; short: string; tone: 'sky' | 'rose' | 'violet' }> = [
-  { label: 'No Optimization', value: 'no_optimization', short: 'Best-effort only', tone: 'rose' },
-  { label: 'Standard GBR', value: 'standard_gbr', short: 'Static protection', tone: 'sky' },
-  { label: 'Dynamic QoS', value: 'dynamic_qos', short: 'Adaptive prioritization', tone: 'violet' },
+const strategies: Array<{ label: string; value: StrategyName; short: string; tone: 'blue' | 'orange' | 'purple' }> = [
+  { label: 'No Optimization', value: 'no_optimization', short: 'All public', tone: 'orange' },
+  { label: 'Standard GBR', value: 'standard_gbr', short: 'Static reservation', tone: 'blue' },
+  { label: 'Dynamic QoS', value: 'dynamic_qos', short: 'Temporary grants', tone: 'purple' },
 ]
+
+const filterOptions = ['all', 'uploading', 'prioritized', 'public', 'waiting'] as const
+const sortOptions = ['latency', 'ue', 'status'] as const
 
 type PendingAction = 'prepare' | 'run' | 'spawn' | 'stop' | 'reset' | 'refresh'
 type PendingActions = Record<PendingAction, boolean>
+type BoardFilter = (typeof filterOptions)[number]
+type BoardSort = (typeof sortOptions)[number]
+type HistoryPoint = {
+  tick: number
+  active: number
+  p50: number
+  p99: number
+  goodPct: number
+  degradedPct: number
+  highPct: number
+  latencies: number[]
+}
 
 const initialPendingState: PendingActions = {
   prepare: false,
@@ -55,37 +81,45 @@ function App() {
 
   return (
     <div className="page-shell">
-      <motion.div className="page-frame" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.45 }}>
-        <SceneHeader state={liveState.state} loading={liveState.loading} streamStatus={liveState.streamStatus} />
+      <motion.div className="page-frame" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.28 }}>
+        <DashboardHeader
+          draftStrategy={liveState.draftStrategy}
+          appliedStrategy={liveState.state?.strategy}
+          state={liveState.state}
+          loading={liveState.loading}
+          pending={liveState.pending}
+          streamStatus={liveState.streamStatus}
+          onDraftStrategyChange={liveState.setDraftStrategy}
+          onPrepare={liveState.prepareSession}
+          onRun={liveState.startRun}
+          onSpawn={liveState.spawnUsers}
+          onStop={liveState.stopRun}
+          onReset={liveState.resetRun}
+          onRefresh={liveState.refreshState}
+        />
 
-        <div className="page-grid">
-          <PresenterRail
-            draftStrategy={liveState.draftStrategy}
-            appliedStrategy={liveState.state?.strategy}
+        <AnimatePresence>
+          {liveState.error ? (
+            <motion.div className="error-banner" initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }}>
+              <AlertTriangle size={15} />
+              <span>{liveState.error}</span>
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
+
+        <KpiStrip state={liveState.state} streamStatus={liveState.streamStatus} />
+        <InsightStrip state={liveState.state} />
+
+        <main className="dashboard-main">
+          <AnalyticsColumn state={liveState.state} historyPoints={liveState.historyPoints} />
+          <DeviceBoard
             state={liveState.state}
-            loading={liveState.loading}
-            pending={liveState.pending}
-            streamStatus={liveState.streamStatus}
-            error={liveState.error}
-            onDraftStrategyChange={liveState.setDraftStrategy}
-            onPrepare={liveState.prepareSession}
-            onRun={liveState.startRun}
-            onSpawn={liveState.spawnUsers}
-            onStop={liveState.stopRun}
-            onReset={liveState.resetRun}
-            onRefresh={liveState.refreshState}
+            resultByID={liveState.resultByID}
+            latencyHistoryByID={liveState.latencyHistoryByID}
+            completionTicks={liveState.completionTicks}
           />
+        </main>
 
-          <main className="storyboard">
-            <HeroPanel state={liveState.state} streamStatus={liveState.streamStatus} />
-            <DeviceBoard
-              state={liveState.state}
-              resultByID={liveState.resultByID}
-              latencyHistoryByID={liveState.latencyHistoryByID}
-              completionTicks={liveState.completionTicks}
-            />
-          </main>
-        </div>
       </motion.div>
     </div>
   )
@@ -101,6 +135,7 @@ function useDemoLiveState() {
   const [completionTicks, setCompletionTicks] = useState<Record<string, number>>({})
   const [resultByID, setResultByID] = useState<Record<string, UploadResult>>({})
   const [latencyHistoryByID, setLatencyHistoryByID] = useState<Record<string, number[]>>({})
+  const [historyPoints, setHistoryPoints] = useState<HistoryPoint[]>([])
   const animationTimersRef = useRef<number[]>([])
   const recordedAttemptsRef = useRef<Record<string, number>>({})
 
@@ -122,6 +157,7 @@ function useDemoLiveState() {
     setCompletionTicks({})
     setResultByID({})
     setLatencyHistoryByID({})
+    setHistoryPoints([])
   }
 
   function applyState(nextState: DemoState | null) {
@@ -140,6 +176,10 @@ function useDemoLiveState() {
       }
       return currentDraft
     })
+
+    if (nextState.running || nextState.counters.active_users > 0) {
+      setHistoryPoints((current) => [...current, makeHistoryPoint(nextState, current.length)].slice(-90))
+    }
 
     if (!nextState.running && nextState.counters.active_users === 0) {
       resetSandboxState()
@@ -233,7 +273,7 @@ function useDemoLiveState() {
           for (const item of freshItems) {
             const history = next[item.id] ? [...next[item.id]] : []
             history.push(item.latency_ms)
-            next[item.id] = history
+            next[item.id] = history.slice(-36)
           }
           return next
         })
@@ -264,6 +304,7 @@ function useDemoLiveState() {
     completionTicks,
     draftStrategy,
     error,
+    historyPoints,
     latencyHistoryByID,
     loading,
     pending,
@@ -281,49 +322,13 @@ function useDemoLiveState() {
   }
 }
 
-function SceneHeader({
-  state,
-  loading,
-  streamStatus,
-}: {
-  state: DemoState | null
-  loading: boolean
-  streamStatus: DemoStreamStatus
-}) {
-  const scenario = state ? scenarioStyle(state.strategy) : scenarioStyle('no_optimization')
-  const liveLabel = state?.running ? 'Live demonstration' : loading ? 'Syncing backend' : 'Prepared view'
-
-  return (
-    <header className="scene-header panel panel-glass">
-      <div>
-        <span className="kicker">QoS simulation demo</span>
-        <h1>Real-time uplink experience under three policy models</h1>
-        <p>
-          Same backend simulation, softer presentation. The page now reads like a presenter surface instead of an ops console.
-        </p>
-      </div>
-
-      <div className="scene-header-chips">
-        <StatusChip icon={<Radio size={15} />} label={liveLabel} tone={state?.running ? 'good' : 'neutral'} />
-        <StatusChip
-          icon={<Wifi size={15} />}
-          label={streamStatus === 'connected' ? 'WebSocket connected' : `WebSocket ${streamStatus}`}
-          tone={streamStatus === 'connected' ? 'good' : 'warn'}
-        />
-        <StatusChip icon={scenario.icon} label={state ? labelForStrategy(state.strategy) : 'No Optimization'} tone={scenario.tone} />
-      </div>
-    </header>
-  )
-}
-
-const PresenterRail = memo(function PresenterRail({
+function DashboardHeader({
   draftStrategy,
   appliedStrategy,
   state,
   loading,
   pending,
   streamStatus,
-  error,
   onDraftStrategyChange,
   onPrepare,
   onRun,
@@ -338,7 +343,6 @@ const PresenterRail = memo(function PresenterRail({
   loading: boolean
   pending: PendingActions
   streamStatus: DemoStreamStatus
-  error: string | null
   onDraftStrategyChange: (value: StrategyName) => void
   onPrepare: () => Promise<void>
   onRun: () => Promise<void>
@@ -347,196 +351,246 @@ const PresenterRail = memo(function PresenterRail({
   onReset: () => Promise<void>
   onRefresh: () => Promise<void>
 }) {
-  const hasDraft = Boolean(appliedStrategy && draftStrategy !== appliedStrategy)
-  const activeUsers = state?.counters.active_users ?? 0
-  const failedUsers = state?.counters.failed_users ?? 0
+  const activeStrategy = state?.strategy ?? appliedStrategy ?? draftStrategy
+  const streamConnected = streamStatus === 'connected'
 
   return (
-    <aside className="presenter-rail">
-      <PanelMotion delay={0.05}>
-        <section className="panel presenter-card card-blue">
-          <div className="panel-head">
-            <span className="panel-index">1</span>
-            <div>
-              <h2>Presenter Controls</h2>
-              <p>Select the scenario and steer the run without leaving the main screen.</p>
-            </div>
-          </div>
+    <header className="dashboard-header">
+      <div className="brand-lockup">
+        <div className="brand-icon">
+          <Radio size={18} />
+        </div>
+        <div className="brand-line">
+          <h1>QoS Uplink Strategy Monitor</h1>
+          <span>Real-time UE Performance Simulation</span>
+        </div>
+      </div>
 
-          <label className="field-label" htmlFor="strategy-select">
-            Strategy
-          </label>
-          <select
-            id="strategy-select"
-            className="soft-select"
-            value={draftStrategy}
-            onChange={(event) => onDraftStrategyChange(event.target.value as StrategyName)}
-          >
-            {strategies.map((item) => (
-              <option key={item.value} value={item.value}>
-                {item.label}
-              </option>
-            ))}
-          </select>
+      <div className="header-controls" aria-label="Dashboard controls">
+        <span className="control-label">Strategy</span>
+        <div className="strategy-toggle" role="group" aria-label="Strategy">
+          {strategies.map((item) => (
+            <button
+              key={item.value}
+              className={item.value === draftStrategy ? 'is-selected' : ''}
+              type="button"
+              onClick={() => onDraftStrategyChange(item.value)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
 
-          <div className="inline-meta">
-            <span>{hasDraft ? `Next prepare: ${labelForStrategy(draftStrategy)}` : 'Aligned with current session'}</span>
-            <span>{streamStatus === 'connected' ? 'WS live' : `WS ${streamStatus}`}</span>
-          </div>
+        <div className="action-row">
+          <ActionButton label="Prepare" pendingLabel="Preparing" onClick={onPrepare} disabled={pending.prepare} pending={pending.prepare} icon={<RefreshCcw size={14} />} />
+          <ActionButton label="Start" pendingLabel="Starting" onClick={onRun} disabled={!state || Boolean(state.running) || pending.run} pending={pending.run} icon={<Play size={14} />} primary />
+          <ActionButton label="Add UEs" pendingLabel="Adding" onClick={onSpawn} disabled={!state?.running || pending.spawn} pending={pending.spawn} icon={<Plus size={14} />} />
+          <ActionButton label="Stop" pendingLabel="Stopping" onClick={onStop} disabled={!state?.running || pending.stop} pending={pending.stop} icon={<StopCircle size={14} />} danger />
+          <ActionButton label="Reset" pendingLabel="Resetting" onClick={onReset} disabled={!state || pending.reset} pending={pending.reset} icon={<RotateCcw size={14} />} />
+          <ActionButton label={loading ? 'Syncing' : 'Refresh'} pendingLabel="Refreshing" onClick={onRefresh} disabled={pending.refresh} pending={pending.refresh} icon={<RefreshCcw size={14} />} iconOnly />
+        </div>
+      </div>
 
-          <div className="action-grid">
-            <ActionButton label="Prepare" pendingLabel="Preparing..." onClick={onPrepare} disabled={pending.prepare} />
-            <ActionButton
-              label="Run"
-              pendingLabel="Starting..."
-              onClick={onRun}
-              disabled={!state || Boolean(state.running) || pending.run}
-              icon={<Play size={15} />}
-              primary
-            />
-            <ActionButton
-              label="Add 5"
-              pendingLabel="Adding..."
-              onClick={onSpawn}
-              disabled={!state?.running || pending.spawn}
-              icon={<Plus size={15} />}
-            />
-            <ActionButton
-              label="Stop"
-              pendingLabel="Stopping..."
-              onClick={onStop}
-              disabled={!state?.running || pending.stop}
-              icon={<StopCircle size={15} />}
-            />
-            <ActionButton
-              label="Reset"
-              pendingLabel="Resetting..."
-              onClick={onReset}
-              disabled={!state || pending.reset}
-              icon={<RotateCcw size={15} />}
-            />
-            <ActionButton
-              label={loading ? 'Syncing...' : 'Refresh'}
-              pendingLabel="Refreshing..."
-              onClick={onRefresh}
-              disabled={pending.refresh}
-              icon={<RefreshCcw size={15} />}
-            />
-          </div>
-        </section>
-      </PanelMotion>
-
-      <PanelMotion delay={0.12}>
-        <section className="panel presenter-card card-violet">
-          <div className="panel-head">
-            <span className="panel-index">2</span>
-            <div>
-              <h2>Live Run Summary</h2>
-              <p>The summary stays compact and presenter-friendly while still showing real backend state.</p>
-            </div>
-          </div>
-
-          <div className="metric-pairs">
-            <MetricPair label="Online devices" value={activeUsers} />
-            <MetricPair label="Failed uploads" value={failedUsers} tone={failedUsers > 0 ? 'error' : 'neutral'} />
-            <MetricPair label="Upload size" value={state ? formatBytes(state.scenario.upload_bytes) : '--'} />
-            <MetricPair label="Interval" value={state ? `${state.scenario.interval_ms} ms` : '--'} />
-          </div>
-        </section>
-      </PanelMotion>
-
-      <PanelMotion delay={0.19}>
-        <section className="panel presenter-card card-rose">
-          <div className="panel-head">
-            <span className="panel-index">3</span>
-            <div>
-              <h2>Run Health</h2>
-              <p>Errors and degraded conditions stay visible without pulling focus from the main story.</p>
-            </div>
-          </div>
-
-          <div className="status-column">
-            <StatusChip icon={<Activity size={15} />} label={state?.running ? 'Run active' : 'Run idle'} tone={state?.running ? 'good' : 'neutral'} />
-            <StatusChip icon={<Gauge size={15} />} label={state ? `${formatMbps(state.bandwidth.total_rate_mbps)} total budget` : 'No budget loaded'} tone="sky" />
-            <StatusChip icon={<Shield size={15} />} label={state ? `${state.counters.protected_users} protected users` : 'No protected users yet'} tone="violet" />
-          </div>
-
-          <AnimatePresence>
-            {error ? (
-              <motion.div
-                className="error-banner"
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-              >
-                <AlertTriangle size={16} />
-                <span>{error}</span>
-              </motion.div>
-            ) : null}
-          </AnimatePresence>
-        </section>
-      </PanelMotion>
-    </aside>
+      <div className="run-strip">
+        <span className={`live-dot ${streamConnected ? 'is-live' : ''}`} />
+        <span>Live Stream {streamConnected ? 'Connected' : streamStatus}</span>
+        <span>{streamConnected ? 'Live' : '--'}</span>
+        <span>Run State:</span>
+        <strong className={state?.running ? 'state-running' : ''}>{state?.running ? 'RUNNING' : state ? 'READY' : 'NO SESSION'}</strong>
+        <span>Strategy:</span>
+        <strong>{labelForStrategy(activeStrategy)}</strong>
+      </div>
+    </header>
   )
-})
+}
 
-function HeroPanel({ state, streamStatus }: { state: DemoState | null; streamStatus: DemoStreamStatus }) {
-  const strategy = state?.strategy ?? 'no_optimization'
-  const current = scenarioStyle(strategy)
+function KpiStrip({
+  state,
+  streamStatus,
+}: {
+  state: DemoState | null
+  streamStatus: DemoStreamStatus
+}) {
+  const activeUsers = state?.counters.active_users ?? 0
+  const goodPercent = activeUsers > 0 && state ? Math.round((state.counters.good_users / activeUsers) * 100) : null
+  const highPercent = activeUsers > 0 && state ? Math.round((state.counters.failed_users / activeUsers) * 100) : null
+  const activeStrategy = state?.strategy ?? 'no_optimization'
 
   return (
-    <PanelMotion delay={0.1}>
-      <section className="panel hero-panel">
-        <div className="hero-lead">
-          <div>
-            <span className="kicker">Current scene</span>
-            <h2>{labelForStrategy(strategy)}</h2>
-            <p>{current.description}</p>
-          </div>
+    <section className="kpi-strip" aria-label="Run summary metrics">
+      <ActiveStrategyCard strategy={activeStrategy} />
+      <MetricCard icon={<Activity size={18} />} label="Active UEs" value={state ? activeUsers : '--'} detail={state ? `${state.counters.planned_users} planned` : 'No session'} tone="blue" />
+      <MetricCard icon={<CheckCircle2 size={18} />} label="Good Latency" value={goodPercent === null ? '--' : `${goodPercent}%`} detail="Good (<=150ms)" tone="green" />
+      <MetricCard icon={<AlertTriangle size={18} />} label="High Latency" value={highPercent === null ? '--' : `${highPercent}%`} detail="High (>300ms)" tone="orange" />
+      <MetricCard icon={<Gauge size={18} />} label="Shared Capacity" value={state ? formatMbps(state.bandwidth.total_rate_mbps) : '--'} detail={`Stream ${streamStatus}`} tone="blue" />
+    </section>
+  )
+}
 
-          <div className="hero-badge">
-            <div className={`hero-badge-icon tone-${current.tone}`}>{current.icon}</div>
-            <div>
-              <strong>{state?.running ? 'Simulation live' : 'Ready to present'}</strong>
-              <span>{streamStatus === 'connected' ? 'Live state is flowing from the backend' : 'Waiting on the live stream'}</span>
+function ActiveStrategyCard({
+  strategy,
+}: {
+  strategy: StrategyName
+}) {
+  const scenario = scenarioStyle(strategy)
+
+  return (
+    <article className={`scenario-summary-card tone-${scenario.tone}`}>
+      <div className="comparison-head">
+        <div className="comparison-icon">{scenario.icon}</div>
+        <div>
+          <h3>{labelForStrategy(strategy)}</h3>
+          <p>{scenario.short}</p>
+        </div>
+        <span className="active-badge">Active</span>
+      </div>
+      <p className="scenario-message">{scenario.expectation}</p>
+    </article>
+  )
+}
+
+function MetricCard({ icon, label, value, detail, tone }: { icon: ReactNode; label: string; value: ReactNode; detail: string; tone: string }) {
+  return (
+    <article className={`metric-card tone-${tone}`}>
+      <div className="metric-icon">{icon}</div>
+      <div>
+        <span>{label}</span>
+        <strong>{value}</strong>
+        <small>{detail}</small>
+      </div>
+    </article>
+  )
+}
+
+function InsightStrip({ state }: { state: DemoState | null }) {
+  if (!state) {
+    return (
+      <section className="insight-strip">
+        <strong>No live run yet.</strong>
+        <span>Prepare a strategy to show how shared uplink capacity affects UE latency.</span>
+      </section>
+    )
+  }
+
+  const activeUsers = state.counters.active_users
+  const goodPercent = activeUsers > 0 ? Math.round((state.counters.good_users / activeUsers) * 100) : 0
+  const highPercent = activeUsers > 0 ? Math.round((state.counters.failed_users / activeUsers) * 100) : 0
+  const status = state.running ? 'is keeping' : 'is ready for'
+
+  return (
+    <section className="insight-strip">
+      <strong>{labelForStrategy(state.strategy)}</strong>
+      <span>
+        {status} {goodPercent}% of {activeUsers} active UEs in Good (&lt;=150ms), with {highPercent}% in High (&gt;300ms).
+      </span>
+    </section>
+  )
+}
+
+function AnalyticsColumn({
+  state,
+  historyPoints,
+}: {
+  state: DemoState | null
+  historyPoints: HistoryPoint[]
+}) {
+  const good = state?.counters.good_users ?? 0
+  const delayed = state?.counters.delayed_users ?? 0
+  const failed = state?.counters.failed_users ?? 0
+  const treatments = state ? treatmentCounts(state.users) : { public: 0, reserved: 0, temporary: 0 }
+  const chartMaxUsers = Math.max(state?.counters.planned_users ?? 0, ...historyPoints.map((point) => point.active), 1)
+  const congestionPoint = historyPoints.find((point) => point.degradedPct + point.highPct > 0)?.active ?? null
+  const latencyCloud = historyPoints.flatMap((point) =>
+    point.latencies.map((latency, index) => ({
+      id: `${point.tick}-${index}`,
+      active: point.active,
+      latency: clampChartLatency(latency),
+      rawLatency: latency,
+    })),
+  )
+
+  return (
+    <section className="analytics-column" aria-label="Simulation analytics">
+      <Panel title="Load & Latency Trend" meta="Latest run">
+        <div className="chart-shell trend-shell">
+          <div className="chart-legend">
+            <span className="legend-item cloud">UE latency samples</span>
+            <span className="legend-item purple">P50 latency</span>
+            <span className="legend-item red">P99 latency</span>
+          </div>
+          <div className="empty-chart">
+            <div className="line-chart-wrap">
+              {historyPoints.length ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <ComposedChart data={historyPoints} margin={{ top: 8, right: 10, bottom: 4, left: -18 }}>
+                    <CartesianGrid stroke="#e5edf7" strokeDasharray="3 3" vertical={false} />
+                    <XAxis dataKey="active" type="number" name="Active UEs" tick={{ fontSize: 10, fill: '#667085' }} tickLine={false} axisLine={false} allowDecimals={false} domain={[0, chartMaxUsers]} />
+                    <YAxis dataKey="p99" type="number" domain={[0, 1000]} ticks={[0, 150, 300, 1000]} tickFormatter={formatLatencyAxis} tick={{ fontSize: 10, fill: '#667085' }} tickLine={false} axisLine={false} />
+                    <Tooltip contentStyle={{ border: '1px solid #dce3ef', borderRadius: 8, fontSize: 12 }} formatter={formatChartTooltip} labelFormatter={(value) => `${value} active UEs`} />
+                    <ReferenceArea y1={0} y2={150} fill="#22a34a" fillOpacity={0.08} />
+                    <ReferenceArea y1={150} y2={300} fill="#f59e0b" fillOpacity={0.1} />
+                    <ReferenceArea y1={300} y2={1000} fill="#ef4444" fillOpacity={0.08} />
+                    <ReferenceLine y={150} stroke="#22a34a" strokeDasharray="4 4" strokeOpacity={0.5} />
+                    <ReferenceLine y={300} stroke="#ef4444" strokeDasharray="4 4" strokeOpacity={0.45} />
+                    {congestionPoint ? <ReferenceLine x={congestionPoint} stroke="#0f172a" strokeDasharray="3 5" strokeOpacity={0.45} label={{ value: 'Contention', position: 'insideTop', fill: '#475467', fontSize: 10 }} /> : null}
+                    <Scatter data={latencyCloud} dataKey="latency" name="UE latency" fill="#2563eb" fillOpacity={0.22} line={false} isAnimationActive={false} />
+                    <Line type="monotone" dataKey="p50" name="P50 latency" stroke="#7c3aed" strokeWidth={2.2} dot={false} isAnimationActive={false} />
+                    <Line type="monotone" dataKey="p99" name="P99 latency" stroke="#ef4444" strokeWidth={2.8} dot={false} isAnimationActive={false} />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              ) : (
+                <ChartEmpty label="Trend appears when the run starts" />
+              )}
+            </div>
+            <div className="threshold-stack">
+              <span>1000ms+</span>
+              <span>High (&gt;300ms)</span>
+              <span>Degraded (150-300ms)</span>
+              <span>Good (&lt;=150ms)</span>
             </div>
           </div>
         </div>
+      </Panel>
 
-        <div className="hero-scenarios">
-          {strategies.map((item, index) => {
-            const scenario = scenarioStyle(item.value)
-            const active = item.value === strategy
-            return (
-              <motion.div
-                key={item.value}
-                className={`scenario-card tone-${scenario.tone} ${active ? 'is-active' : ''}`}
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.12 + index * 0.06 }}
-              >
-                <div className="scenario-card-head">
-                  <span className="scenario-step">{index + 1}</span>
-                  <span className="scenario-card-icon">{scenario.icon}</span>
-                </div>
-                <strong>{item.label}</strong>
-                <p>{scenario.caption}</p>
-                <div className="scenario-meta">{scenario.expectation}</div>
-              </motion.div>
-            )
-          })}
-        </div>
-
-        {state ? (
-          <div className="hero-stats">
-            <HeroStat label="Good" value={state.counters.good_users} tone="good" icon={<CheckCircle2 size={16} />} />
-            <HeroStat label="Delayed" value={state.counters.delayed_users} tone="warn" icon={<Clock3 size={16} />} />
-            <HeroStat label="Failed" value={state.counters.failed_users} tone="error" icon={<XCircle size={16} />} />
-            <HeroStat label="Dynamic grants" value={state.counters.temporary_grants} tone="violet" icon={<Sparkles size={16} />} />
+      <Panel title="Upload Outcome Distribution" meta="Current split">
+        <div className="outcome-layout">
+          <div className="area-chart-wrap">
+            {historyPoints.length ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={historyPoints} margin={{ top: 6, right: 6, bottom: 0, left: -24 }}>
+                  <XAxis dataKey="active" type="number" tick={{ fontSize: 10, fill: '#667085' }} tickLine={false} axisLine={false} allowDecimals={false} domain={[0, chartMaxUsers]} />
+                  <YAxis domain={[0, 100]} ticks={[0, 50, 100]} tickFormatter={(value) => `${value}%`} tick={{ fontSize: 10, fill: '#667085' }} tickLine={false} axisLine={false} />
+                  <Tooltip contentStyle={{ border: '1px solid #dce3ef', borderRadius: 8, fontSize: 12 }} formatter={(value, name) => [`${Number(value).toFixed(0)}%`, name]} labelFormatter={(value) => `${value} active UEs`} />
+                  <Area type="monotone" dataKey="goodPct" name="Good" stackId="1" stroke="#22a34a" fill="#86d993" isAnimationActive={false} />
+                  <Area type="monotone" dataKey="degradedPct" name="Degraded" stackId="1" stroke="#f59e0b" fill="#fbd38d" isAnimationActive={false} />
+                  <Area type="monotone" dataKey="highPct" name="High" stackId="1" stroke="#ef4444" fill="#fca5a5" isAnimationActive={false} />
+                </AreaChart>
+              </ResponsiveContainer>
+            ) : (
+              <ChartEmpty label="Outcome history is empty" />
+            )}
           </div>
-        ) : null}
-      </section>
-    </PanelMotion>
+          <div className="outcome-list">
+            <OutcomeRow label="Good" value={good} tone="green" />
+            <OutcomeRow label="Degraded" value={delayed} tone="orange" />
+            <OutcomeRow label="High" value={failed} tone="red" />
+          </div>
+        </div>
+      </Panel>
+
+      <Panel title="Treatment Allocation" meta="Current">
+        <div className="allocation-bar" aria-label="Treatment allocation">
+          <span className="public" style={{ flexGrow: treatments.public || 0.0001 }}>Public</span>
+          <span className="temporary" style={{ flexGrow: treatments.temporary || 0.0001 }}>Temp</span>
+          <span className="reserved" style={{ flexGrow: treatments.reserved || 0.0001 }}>Reserved</span>
+        </div>
+        <div className="allocation-labels">
+          <strong>{treatments.public} public</strong>
+          <strong>{treatments.temporary} temp</strong>
+          <strong>{treatments.reserved} reserved</strong>
+        </div>
+      </Panel>
+    </section>
   )
 }
 
@@ -551,59 +605,67 @@ const DeviceBoard = memo(function DeviceBoard({
   latencyHistoryByID: Record<string, number[]>
   completionTicks: Record<string, number>
 }) {
+  const [filter, setFilter] = useState<BoardFilter>('all')
+  const [sortMode, setSortMode] = useState<BoardSort>('ue')
   const deferredUsers = useDeferredValue(state?.users ?? [])
   const deferredResultByID = useDeferredValue(resultByID)
   const deferredLatencyHistoryByID = useDeferredValue(latencyHistoryByID)
   const deferredCompletionTicks = useDeferredValue(completionTicks)
-  const activeUsers = deferredUsers.filter((user) => user.active)
-  const plannedUsers = deferredUsers.length - activeUsers.length
+  const filterCounts = useMemo(() => boardFilterCounts(deferredUsers), [deferredUsers])
+  const visibleUsers = useMemo(
+    () => sortUsers(filterUsers(deferredUsers, filter), sortMode, deferredResultByID),
+    [deferredUsers, deferredResultByID, filter, sortMode],
+  )
 
   return (
-    <PanelMotion delay={0.16}>
-      <section className="panel board-panel">
-        <div className="board-header">
-          <div>
-            <span className="kicker">Live device board</span>
-            <h2>UE experience view</h2>
-            <p>Real devices, real session state, real latency outcomes. Just presented with less visual noise.</p>
-          </div>
-
-          <div className="scene-header-chips">
-            <StatusChip icon={<CircleDot size={15} />} label={`${activeUsers.length} online`} tone="sky" />
-            <StatusChip icon={<Clock3 size={15} />} label={`${plannedUsers} waiting`} tone="neutral" />
-          </div>
+    <section className="panel activity-board">
+      <div className="panel-title-row">
+        <div>
+          <h2>UE Activity Board</h2>
+          <p>{state ? `${visibleUsers.length} visible UEs` : 'No prepared session'}</p>
         </div>
+        <div className="sort-control">
+          <span>Sort By</span>
+          <select value={sortMode} onChange={(event) => setSortMode(event.target.value as BoardSort)}>
+            {sortOptions.map((option) => (
+              <option key={option} value={option}>
+                {labelForSort(option)}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
 
-        {state ? (
-          <>
-            {plannedUsers > 0 ? (
-              <div className="planned-strip">
-                <div>
-                  <span className="kicker">Pending attach</span>
-                  <strong>{plannedUsers} devices are not connected yet</strong>
-                </div>
-                <span>Cards appear as soon as the PDU session comes up.</span>
-              </div>
-            ) : null}
+      <div className="board-tabs" role="tablist" aria-label="UE filters">
+        {filterOptions.map((option) => (
+          <button key={option} className={filter === option ? 'is-active' : ''} type="button" onClick={() => setFilter(option)}>
+            <span>{labelForFilter(option)}</span>
+            <strong>{filterCounts[option]}</strong>
+          </button>
+        ))}
+      </div>
 
-            <div className="device-grid">
-              {activeUsers.map((user, index) => (
-                <DeviceCard
-                  key={user.client_id}
-                  user={user}
-                  latestResult={deferredResultByID[user.client_id]}
-                  latencyHistory={deferredLatencyHistoryByID[user.client_id] ?? []}
-                  completionTick={deferredCompletionTicks[user.client_id] ?? 0}
-                  index={index}
-                />
-              ))}
-            </div>
-          </>
+      {state ? (
+        visibleUsers.length ? (
+          <div className="ue-grid">
+            {visibleUsers.map((user, index) => (
+              <DeviceCard
+                key={user.client_id}
+                user={user}
+                latestResult={deferredResultByID[user.client_id]}
+                latencyHistory={deferredLatencyHistoryByID[user.client_id] ?? []}
+                completionTick={deferredCompletionTicks[user.client_id] ?? 0}
+                index={index}
+              />
+            ))}
+          </div>
         ) : (
-          <div className="board-empty">Awaiting real backend state</div>
-        )}
-      </section>
-    </PanelMotion>
+          <div className="board-empty">No UEs match {labelForFilter(filter)}</div>
+        )
+      ) : (
+        <div className="board-empty">No session prepared</div>
+      )}
+    </section>
   )
 })
 
@@ -622,22 +684,24 @@ const DeviceCard = memo(function DeviceCard({
 }) {
   const displayStatus = latestResult ? classifyResultStatus(latestResult) : user.status
   const displayLatencyMS = latestResult?.latency_ms ?? user.last_latency_ms ?? 0
-  const p50 = percentile(latencyHistory, 0.5)
-  const p99 = percentile(latencyHistory, 0.99)
+  const treatment = treatmentLabel(user)
 
   return (
     <motion.article
-      className={`device-card status-${displayStatus} ${completionTick > 0 ? 'is-complete' : ''}`}
-      initial={{ opacity: 0, y: 14 }}
+      className={`ue-card status-${displayStatus} treatment-${user.treatment} ${user.active ? '' : 'is-waiting'} ${completionTick > 0 ? 'is-complete' : ''}`}
+      initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: 0.2 + (index % 8) * 0.03 }}
+      transition={{ delay: 0.05 + (index % 12) * 0.015 }}
     >
-      <div className="device-card-head">
+      <div className="ue-card-top">
         <div>
-          <span className="kicker">Device</span>
-          <h3>{labelForDevice(user)}</h3>
+          <span className="ue-status-dot" />
+          <strong>{ueLabel(user)}</strong>
         </div>
+        <span className="treatment-pill">{treatment}</span>
+      </div>
 
+      <div className="ue-card-body">
         <div
           className="ue-health-indicator"
           style={
@@ -663,119 +727,168 @@ const DeviceCard = memo(function DeviceCard({
           <span key={`flash-${user.client_id}-${completionTick}`} className="completion-flash" />
           <span className="dot-core" />
         </div>
+        <strong>{user.active ? formatLatency(displayLatencyMS) : 'Waiting'}</strong>
       </div>
 
-      <div className="device-session">
-        <span>PDU Session</span>
-        <strong>{pduSessionStatus(user)}</strong>
-      </div>
-
-      <div className="latency-strip">
-        <LatencyCell label="Last" value={displayLatencyMS} />
-        <LatencyCell label="P50" value={p50} />
-        <LatencyCell label="P99" value={p99} />
-      </div>
+      <SparkBars samples={latencyHistory} />
     </motion.article>
   )
 })
+
+function Panel({ title, meta, children }: { title: string; meta: string; children: ReactNode }) {
+  return (
+    <section className="panel analytics-panel">
+      <div className="panel-title-row">
+        <div>
+          <h2>{title}</h2>
+          <p>{meta}</p>
+        </div>
+        <CircleDot size={14} />
+      </div>
+      {children}
+    </section>
+  )
+}
 
 function ActionButton({
   label,
   pendingLabel,
   onClick,
   disabled,
+  pending = false,
   icon,
   primary = false,
+  danger = false,
+  iconOnly = false,
 }: {
   label: string
   pendingLabel: string
   onClick: () => Promise<void>
   disabled: boolean
+  pending?: boolean
   icon?: ReactNode
   primary?: boolean
+  danger?: boolean
+  iconOnly?: boolean
 }) {
-  const busy = disabled && pendingLabel !== label
-
   return (
-    <button className={`soft-button ${primary ? 'is-primary' : ''}`} type="button" onClick={() => void onClick()} disabled={disabled}>
-      <span className="button-icon">{busy ? <RefreshCcw size={15} className="spin" /> : icon}</span>
-      <span>{busy ? pendingLabel : label}</span>
+    <button
+      className={`soft-button ${primary ? 'is-primary' : ''} ${danger ? 'is-danger' : ''} ${iconOnly ? 'is-icon-only' : ''}`}
+      type="button"
+      onClick={() => void onClick()}
+      disabled={disabled}
+      aria-label={label}
+      title={iconOnly ? label : undefined}
+    >
+      <span className="button-icon">{pending ? <RefreshCcw size={14} className="spin" /> : icon}</span>
+      {iconOnly ? null : <span>{pending ? pendingLabel : label}</span>}
     </button>
   )
 }
 
-function HeroStat({ label, value, tone, icon }: { label: string; value: number; tone: string; icon: ReactNode }) {
+function OutcomeRow({ label, value, tone }: { label: string; value: number; tone: string }) {
   return (
-    <div className={`hero-stat tone-${tone}`}>
-      <span className="hero-stat-icon">{icon}</span>
-      <div>
-        <strong>{value}</strong>
-        <span>{label}</span>
-      </div>
-    </div>
-  )
-}
-
-function StatusChip({ icon, label, tone }: { icon: ReactNode; label: string; tone: string }) {
-  return (
-    <div className={`status-chip tone-${tone}`}>
-      <span>{icon}</span>
+    <div className={`outcome-row tone-${tone}`}>
       <span>{label}</span>
+      <strong>{value} UEs</strong>
     </div>
   )
 }
 
-function MetricPair({ label, value, tone = 'neutral' }: { label: string; value: string | number; tone?: string }) {
+function SparkBars({ samples, tall = false }: { samples: number[]; tall?: boolean }) {
+  const displaySamples = samples.slice(-24)
+  const max = Math.max(...displaySamples, 1)
+
   return (
-    <div className={`metric-pair tone-${tone}`}>
-      <span>{label}</span>
-      <strong>{value}</strong>
+    <div className={`spark-bars ${tall ? 'is-tall' : ''}`} aria-hidden="true">
+      {Array.from({ length: 24 }).map((_, index) => {
+        const value = displaySamples[index - (24 - displaySamples.length)]
+        const height = value ? Math.max(12, Math.round((value / max) * 100)) : 0
+        return <span key={index} style={{ height: `${height}%` }} />
+      })}
     </div>
   )
 }
 
-function LatencyCell({ label, value }: { label: string; value: number | null }) {
-  return (
-    <div className="latency-cell">
-      <span>{label}</span>
-      <strong>{formatLatency(value)}</strong>
-    </div>
-  )
-}
-
-function PanelMotion({ children, delay = 0 }: { children: ReactNode; delay?: number }) {
-  return (
-    <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.35, delay }}>
-      {children}
-    </motion.div>
-  )
+function ChartEmpty({ label }: { label: string }) {
+  return <div className="chart-empty-label">{label}</div>
 }
 
 function labelForStrategy(strategy: StrategyName) {
   return strategies.find((item) => item.value === strategy)?.label ?? strategy
 }
 
-function labelForDevice(user: DemoUser) {
-  return `Phone ${String(user.index).padStart(2, '0')}`
+function labelForFilter(filter: BoardFilter) {
+  switch (filter) {
+    case 'all':
+      return 'All'
+    case 'uploading':
+      return 'Uploading'
+    case 'prioritized':
+      return 'Prioritized'
+    case 'public':
+      return 'Public'
+    case 'waiting':
+      return 'Waiting'
+  }
 }
 
-function pduSessionStatus(user: DemoUser) {
-  return user.active ? 'PDU Session Established' : 'Not connected'
+function labelForSort(sortMode: BoardSort) {
+  switch (sortMode) {
+    case 'latency':
+      return 'Latency'
+    case 'ue':
+      return 'IMSI'
+    case 'status':
+      return 'Status'
+  }
 }
 
-function formatBytes(value: number) {
-  return `${(value / 1024).toFixed(0)} KiB`
+function ueLabel(user: DemoUser) {
+  return `IMSI ${String(user.index).padStart(5, '0')}`
+}
+
+function treatmentLabel(user: DemoUser) {
+  if (!user.active) {
+    return 'Wait'
+  }
+  if (user.treatment === 'temporary_grant') {
+    return 'Temp'
+  }
+  if (user.treatment === 'reserved') {
+    return 'GBR'
+  }
+  return 'Public'
 }
 
 function formatMbps(value: number) {
-  return `${value.toFixed(1)} Mbps`
+  return `${value.toFixed(0)} Mbps`
 }
 
-function formatLatency(value: number | null) {
-  if (value === null || value <= 0) {
+function formatLatency(value: number | null | undefined) {
+  if (value === null || value === undefined || value <= 0) {
     return '--'
   }
+  if (value >= 900) {
+    return '1000ms+'
+  }
   return `${value.toFixed(0)} ms`
+}
+
+function clampChartLatency(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value) || value <= 0) {
+    return 0
+  }
+  return Math.min(value, 1000)
+}
+
+function formatLatencyAxis(value: number) {
+  return value >= 1000 ? '1000ms+' : `${value}ms`
+}
+
+function formatChartTooltip(value: unknown, name: unknown): [ReactNode, string] {
+  const numeric = Number(value)
+  return [Number.isFinite(numeric) ? formatLatency(numeric) : String(value), String(name)]
 }
 
 function percentile(samples: number[], fraction: number) {
@@ -787,14 +900,118 @@ function percentile(samples: number[], fraction: number) {
   return sorted[index]
 }
 
+function makeHistoryPoint(state: DemoState, tick: number): HistoryPoint {
+  const stateLatencies = state.users
+    .filter((user) => user.active)
+    .map((user) => user.last_latency_ms ?? 0)
+    .filter((value) => value > 0)
+  const activeUsers = state.counters.active_users
+  const percentOfActive = (value: number) => (activeUsers > 0 ? Math.round((value / activeUsers) * 100) : 0)
+
+  return {
+    tick,
+    active: activeUsers,
+    p50: clampChartLatency(percentile(stateLatencies, 0.5)),
+    p99: clampChartLatency(percentile(stateLatencies, 0.99)),
+    goodPct: percentOfActive(state.counters.good_users),
+    degradedPct: percentOfActive(state.counters.delayed_users),
+    highPct: percentOfActive(state.counters.failed_users),
+    latencies: stateLatencies,
+  }
+}
+
+function treatmentCounts(users: DemoUser[]) {
+  return users.reduce(
+    (counts, user) => {
+      if (!user.active) {
+        return counts
+      }
+      if (user.treatment === 'reserved') {
+        counts.reserved += 1
+      } else if (user.treatment === 'temporary_grant') {
+        counts.temporary += 1
+      } else {
+        counts.public += 1
+      }
+      return counts
+    },
+    { public: 0, reserved: 0, temporary: 0 },
+  )
+}
+
+function filterUsers(users: DemoUser[], filter: BoardFilter) {
+  switch (filter) {
+    case 'uploading':
+      return users.filter((user) => user.active && (user.uploading || user.running))
+    case 'prioritized':
+      return users.filter((user) => user.active && user.treatment !== 'public')
+    case 'public':
+      return users.filter((user) => user.active && user.treatment === 'public')
+    case 'waiting':
+      return users.filter((user) => !user.active)
+    case 'all':
+    default:
+      return users
+  }
+}
+
+function boardFilterCounts(users: DemoUser[]): Record<BoardFilter, number> {
+  return {
+    all: users.length,
+    uploading: users.filter((user) => user.active && (user.uploading || user.running)).length,
+    prioritized: users.filter((user) => user.active && user.treatment !== 'public').length,
+    public: users.filter((user) => user.active && user.treatment === 'public').length,
+    waiting: users.filter((user) => !user.active).length,
+  }
+}
+
+function sortUsers(users: DemoUser[], sortMode: BoardSort, resultByID: Record<string, UploadResult>) {
+  const next = [...users]
+  next.sort((left, right) => {
+    let result = 0
+    if (sortMode === 'latency') {
+      result = latestLatency(right, resultByID) - latestLatency(left, resultByID)
+    } else if (sortMode === 'status') {
+      result = statusRank(right, resultByID) - statusRank(left, resultByID)
+    } else {
+      result = left.index - right.index
+    }
+    return result || left.index - right.index
+  })
+  return next
+}
+
+function latestLatency(user: DemoUser, resultByID: Record<string, UploadResult>) {
+  return resultByID[user.client_id]?.latency_ms ?? user.last_latency_ms ?? 0
+}
+
+function statusRank(user: DemoUser, resultByID: Record<string, UploadResult>) {
+  const status = resultByID[user.client_id] ? classifyResultStatus(resultByID[user.client_id]) : user.status
+  switch (status) {
+    case 'failed':
+      return 5
+    case 'delayed':
+      return 4
+    case 'running':
+      return 3
+    case 'good':
+      return 2
+    case 'idle':
+      return 1
+    case 'planned':
+    default:
+      return 0
+  }
+}
+
 function classifyResultStatus(result: UploadResult): DemoUserStatus {
   if (!result.success) {
     return 'failed'
   }
-  if (result.latency_ms < 100) {
+  if (result.latency_ms <= 150) {
     return 'good'
   }
-  if (result.latency_ms <= 200) {
+  if (result.latency_ms <= 300) {
     return 'delayed'
   }
   return 'failed'
@@ -812,25 +1029,26 @@ function ringPathLength(status: DemoUserStatus) {
       return 0.72
     case 'idle':
       return 0.34
+    case 'planned':
     default:
-      return 0.08
+      return 0.1
   }
 }
 
 function statusColor(status: DemoUserStatus) {
   switch (status) {
     case 'good':
-      return '#4f7c4d'
+      return '#24a148'
     case 'delayed':
-      return '#c7821e'
+      return '#f59e0b'
     case 'failed':
-      return '#d85d5d'
+      return '#ef4444'
     case 'running':
-      return '#6677d6'
+      return '#2563eb'
     case 'idle':
-      return '#8e94a3'
+    case 'planned':
     default:
-      return '#b9becc'
+      return '#9ca3af'
   }
 }
 
@@ -852,27 +1070,24 @@ function scenarioStyle(strategy: StrategyName) {
   switch (strategy) {
     case 'standard_gbr':
       return {
-        tone: 'sky',
+        tone: 'blue' as const,
+        short: 'Static reservation',
         icon: <Shield size={16} />,
-        description: 'Static reservation keeps an admitted set stable, but later devices degrade once the protected pool is committed.',
-        caption: 'Early devices stay protected while capacity remains pinned to their sessions.',
-        expectation: 'About 30 users should remain good.',
+        expectation: 'Protects reserved UEs while others compete.',
       }
     case 'dynamic_qos':
       return {
-        tone: 'violet',
+        tone: 'purple' as const,
+        short: 'Temporary grants',
         icon: <Sparkles size={16} />,
-        description: 'Prioritized treatment is granted only while uploads are active, then immediately released for reuse across the population.',
-        caption: 'Adaptive scheduling reuses the same total budget more efficiently.',
-        expectation: 'All 50 users should stay in the good range.',
+        expectation: 'Reuses priority so more UEs stay in good latency.',
       }
     default:
       return {
-        tone: 'rose',
+        tone: 'orange' as const,
+        short: 'All public',
         icon: <Activity size={16} />,
-        description: 'All devices compete on the public path. Queueing builds quickly and visible degradation spreads across the population.',
-        caption: 'The shared unmanaged lane deteriorates first under contention.',
-        expectation: 'Only about 10 users stay reliably good.',
+        expectation: 'Degrades quickly under shared contention.',
       }
   }
 }

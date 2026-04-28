@@ -14,6 +14,7 @@ const (
 	demoPlannedUsers  = 50
 	demoInitialUsers  = 10
 	demoRampPerSecond = 5
+	demoDynamicQoSWarmupGrace = 1500 * time.Millisecond
 )
 
 type DemoUserStatus string
@@ -467,8 +468,14 @@ func (m *ScenarioManager) demoStateLocked() DemoStateResponse {
 			user.Treatment = demoEffectiveTreatment(m.demo.Strategy, user.Treatment, client.Profile)
 			switch {
 			case user.Uploading && user.UploadStartedAt != nil:
-				user.LastLatencyMS = elapsedMS(*user.UploadStartedAt, now)
-				user.Status = classifyDemoUserStatus(user.LastLatencyMS)
+				elapsed := now.Sub(*user.UploadStartedAt)
+				if m.demo.Strategy == StrategyDynamicQoS && client.LastLatencyMS == 0 && elapsed < demoDynamicQoSWarmupGrace {
+					user.LastLatencyMS = 0
+					user.Status = DemoUserStatusRunning
+				} else {
+					user.LastLatencyMS = elapsedMS(*user.UploadStartedAt, now)
+					user.Status = classifyDemoUserStatus(user.LastLatencyMS)
+				}
 			case user.Uploading:
 				user.Status = DemoUserStatusRunning
 				user.LastLatencyMS = client.LastLatencyMS

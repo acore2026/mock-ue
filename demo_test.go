@@ -234,11 +234,11 @@ func TestDemoStateUsesProvisionalStatusForUploadingUsers(t *testing.T) {
 	now := time.Now().UTC()
 	start := now.Add(-150 * time.Millisecond)
 	mgr := newScenarioManager("/tmp/mock-ue")
-	session := newDemoSession(StrategyDynamicQoS)
+	session := newDemoSession(StrategyStandardGBR)
 	session.Users[0].ActivatedAt = &now
 	session.Users[0].Uploading = true
 	session.Users[0].UploadStartedAt = &start
-	session.Users[0].Treatment = DemoTreatmentTemporaryGrant
+	session.Users[0].Treatment = DemoTreatmentReserved
 	mgr.demo = &session
 	mgr.metrics.reset(session.Config)
 	mgr.metrics.setClient("mockue-cli-01", "10.30.1.2", ProfileOptimized)
@@ -254,5 +254,32 @@ func TestDemoStateUsesProvisionalStatusForUploadingUsers(t *testing.T) {
 	}
 	if state.Counters.DelayedUsers != 1 {
 		t.Fatalf("delayed users = %d, want 1", state.Counters.DelayedUsers)
+	}
+}
+
+func TestDemoStateKeepsDynamicQoSStartupUploadRunningDuringWarmup(t *testing.T) {
+	now := time.Now().UTC()
+	start := now.Add(-900 * time.Millisecond)
+	mgr := newScenarioManager("/tmp/mock-ue")
+	session := newDemoSession(StrategyDynamicQoS)
+	session.Users[0].ActivatedAt = &now
+	session.Users[0].Uploading = true
+	session.Users[0].UploadStartedAt = &start
+	session.Users[0].Treatment = DemoTreatmentTemporaryGrant
+	mgr.demo = &session
+	mgr.metrics.reset(session.Config)
+	mgr.metrics.setClient("mockue-cli-01", "10.30.1.2", ProfileOptimized)
+	mgr.metrics.setClientRunning("mockue-cli-01", true)
+
+	state := mgr.demoStateLocked()
+	user := state.Users[0]
+	if user.Status != DemoUserStatusRunning {
+		t.Fatalf("status = %q, want running", user.Status)
+	}
+	if user.LastLatencyMS != 0 {
+		t.Fatalf("last latency = %v, want 0 during dynamic warmup", user.LastLatencyMS)
+	}
+	if state.Counters.FailedUsers != 0 {
+		t.Fatalf("failed users = %d, want 0 during dynamic warmup", state.Counters.FailedUsers)
 	}
 }
