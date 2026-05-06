@@ -33,7 +33,7 @@
 .page-frame {
   position: relative;
   display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   gap: 8px;
   height: calc(100vh - 20px);
   min-height: 0;
@@ -41,7 +41,6 @@
 }
 
 .panel,
-.metric-card,
 .comparison-card,
 .scenario-summary-card {
   border: 1px solid var(--line);
@@ -52,7 +51,7 @@
 
 .dashboard-header {
   display: grid;
-  grid-template-columns: minmax(300px, 1fr) auto;
+  grid-template-columns: minmax(580px, 1fr) auto;
   gap: 5px 18px;
   padding: 4px 4px 2px;
   background: transparent;
@@ -63,7 +62,6 @@
 .action-row,
 .panel-title-row,
 .comparison-head,
-.metric-card,
 .ue-card-top,
 .ue-card-body,
 .outcome-row,
@@ -79,15 +77,13 @@
 
 .brand-line {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
   min-width: 0;
-  white-space: nowrap;
 }
 
 .brand-icon,
-.metric-icon,
 .comparison-icon {
   display: grid;
   place-items: center;
@@ -112,12 +108,56 @@
   letter-spacing: -0.025em;
 }
 
-.metric-card small,
 .sort-control span {
   margin: 3px 0 0;
   color: var(--muted);
   font-size: 0.76rem;
   line-height: 1.25;
+}
+
+.header-indicators {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.header-indicators > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid rgba(185, 199, 218, 0.72);
+  border-radius: 999px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.58);
+  font-size: 0.72rem;
+  font-weight: 650;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.header-indicators strong {
+  color: var(--text);
+  font-size: 0.76rem;
+  font-weight: 760;
+}
+
+.indicator-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--blue);
+}
+
+.indicator-dot.is-online {
+  background: var(--green);
+}
+
+.indicator-dot.is-throughput {
+  background: var(--blue);
 }
 
 .header-controls {
@@ -213,40 +253,6 @@
   font-size: 0.78rem;
 }
 
-.kpi-strip {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.metric-card {
-  position: relative;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 68px;
-  align-items: center;
-  min-height: 70px;
-  gap: 8px;
-  padding: 9px 10px;
-  overflow: hidden;
-}
-
-.metric-main {
-  display: flex;
-  align-items: center;
-  min-width: 0;
-  gap: 9px;
-}
-
-.metric-icon {
-  width: 38px;
-  height: 38px;
-}
-
-.metric-copy {
-  min-width: 0;
-}
-
-.metric-card span,
 .outcome-row span,
 .metric-inline span,
 .ue-treatment-badge {
@@ -255,72 +261,16 @@
   font-weight: 650;
 }
 
-.metric-card strong {
-  display: block;
-  margin-top: 4px;
-  overflow: hidden;
-  color: var(--text);
-  font-size: 1.38rem;
-  font-weight: var(--font-weight-strong);
-  line-height: 1;
-  letter-spacing: 0;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.metric-card small {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.metric-visual {
-  align-self: end;
-  height: 26px;
-  min-width: 0;
-}
-
-.metric-mini-bars {
-  display: flex;
-  align-items: flex-end;
-  justify-content: flex-end;
-  gap: 2px;
-  height: 100%;
-}
-
-.metric-mini-bars span {
-  width: 3px;
-  border-radius: 999px 999px 0 0;
-  background: var(--blue);
-  opacity: 0.82;
-}
-
-.metric-mini-bars.tone-green span {
-  background: var(--green);
-}
-
-.metric-mini-bars.tone-orange span {
-  background: var(--orange);
-}
-
-.metric-mini-bars.tone-purple span {
-  background: var(--purple);
-}
-
-.tone-green .metric-icon,
 .tone-green .comparison-icon {
   color: #fff;
   background: var(--green);
 }
 
-.tone-orange .metric-icon,
 .tone-orange .comparison-icon {
   color: #fff;
   background: var(--orange);
 }
 
-.tone-purple .metric-icon,
 .tone-purple .comparison-icon {
   color: #fff;
   background: var(--purple);
@@ -1252,25 +1202,6 @@
     padding: 6px 10px 5px;
   }
 
-  .metric-card {
-    min-height: 62px;
-    padding: 7px 9px;
-  }
-
-  .metric-card strong {
-    font-size: 1.08rem;
-  }
-
-  .metric-card small,
-  .metric-card span {
-    font-size: 0.66rem;
-  }
-
-  .metric-icon {
-    width: 26px;
-    height: 26px;
-  }
-
   .strategy-comparison {
     min-height: 74px;
   }
@@ -1330,7 +1261,6 @@
 
 @media (max-width: 1080px) {
   .dashboard-header,
-  .kpi-strip,
   .strategy-comparison,
   .analytics-column {
     grid-template-columns: 1fr;
@@ -1361,10 +1291,6 @@
   .board-tabs button {
     flex: 1;
     padding: 0 8px;
-  }
-
-  .kpi-strip {
-    gap: 8px;
   }
 
   .outcome-layout,

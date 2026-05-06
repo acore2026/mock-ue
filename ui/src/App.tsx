@@ -4,9 +4,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import {
   Activity,
   AlertTriangle,
-  CheckCircle2,
   CircleDot,
-  Gauge,
   Smartphone,
   Play,
   Radio,
@@ -111,7 +109,6 @@ function App() {
           pendingStrategy={liveState.pendingStrategy}
           onModeSelect={liveState.switchMode}
         />
-        <KpiStrip state={liveState.state} historyPoints={liveState.historyPoints} />
         <DashboardBody
           state={liveState.state}
           historyPoints={liveState.historyPoints}
@@ -333,6 +330,7 @@ function DashboardHeader({
         </div>
         <div className="brand-line">
           <h1>QoS Uplink Strategy Monitor</h1>
+          <HeaderIndicators state={state} />
         </div>
       </div>
 
@@ -348,122 +346,23 @@ function DashboardHeader({
   )
 }
 
-function KpiStrip({
-  state,
-  historyPoints,
-}: {
-  state: DemoState | null
-  historyPoints: HistoryPoint[]
-}) {
+function HeaderIndicators({ state }: { state: DemoState | null }) {
   const activeUsers = state?.counters.active_users ?? 0
-  const latestPoint = historyPoints.at(-1)
-  const goodPercent = state ? goodLatencyPercent(state) : null
-  const p50 = state ? p50Latency(state) ?? latestPoint?.p50 ?? null : null
-  const prioritized = state ? prioritizedCount(state) : 0
-  const temporary = state?.counters.temporary_grants ?? 0
-  const reserved = state?.counters.protected_users ?? 0
-  const activeSeries = historyPoints.map((point) => point.active)
-  const goodSeries = historyPoints.map((point) => point.goodPct)
-  const p50Series = historyPoints.map((point) => point.p50)
-  const prioritizedSeries = historyPoints.map((point) => point.prioritized)
-  const temporarySeries = historyPoints.map((point) => point.temporary)
-  const capacitySeries = historyPoints.map((point) => point.capacity)
+  const plannedUsers = state?.users.length ?? 0
+  const throughput = state ? formatMbps(state.bandwidth.total_rate_mbps) : '--'
 
   return (
-    <section className="kpi-strip" aria-label="Run summary metrics">
-      <MetricCard
-        icon={<Activity size={18} />}
-        label="Active UEs"
-        value={state ? activeUsers : '--'}
-        detail={state ? `${activeUsers} active / ${state.users.length} total` : 'No session'}
-        tone="blue"
-        visual={<MetricMiniBars samples={activeSeries} tone="blue" />}
-      />
-      <MetricCard
-        icon={<CheckCircle2 size={18} />}
-        label="Good Latency"
-        value={goodPercent === null ? '--' : `${goodPercent}%`}
-        detail={state ? `${state.counters.good_users} UEs <=150ms` : 'Good <=150ms'}
-        tone="green"
-        visual={<MetricMiniBars samples={goodSeries} tone="green" />}
-      />
-      <MetricCard
-        icon={<Gauge size={18} />}
-        label="P50 Upload Latency"
-        value={formatLatency(p50)}
-        detail="Rolling median"
-        tone="purple"
-        visual={<MetricMiniBars samples={p50Series} tone="purple" />}
-      />
-      <MetricCard
-        icon={<Shield size={18} />}
-        label="Prioritized UEs"
-        value={state ? prioritized : '--'}
-        detail={state ? `${reserved} Reserved / ${temporary} Temp` : 'Reserved / Temp'}
-        tone="purple"
-        visual={<MetricMiniBars samples={prioritizedSeries} tone="purple" />}
-      />
-      <MetricCard
-        icon={<Sparkles size={18} />}
-        label="Temporary Grants"
-        value={state ? temporary : '--'}
-        detail="Dynamic allocation"
-        tone="orange"
-        visual={<MetricMiniBars samples={temporarySeries} tone="orange" />}
-      />
-      <MetricCard
-        icon={<Radio size={18} />}
-        label="Shared Capacity"
-        value={state ? formatMbps(state.bandwidth.total_rate_mbps) : '--'}
-        detail="Uplink (Shared)"
-        tone="blue"
-        visual={<MetricMiniBars samples={capacitySeries} tone="blue" />}
-      />
-    </section>
-  )
-}
-
-function MetricCard({
-  icon,
-  label,
-  value,
-  detail,
-  tone,
-  visual,
-}: {
-  icon: ReactNode
-  label: string
-  value: ReactNode
-  detail: string
-  tone: string
-  visual?: ReactNode
-}) {
-  return (
-    <article className={`metric-card tone-${tone}`}>
-      <div className="metric-main">
-        <div className="metric-icon">{icon}</div>
-        <div className="metric-copy">
-          <span>{label}</span>
-          <strong>{value}</strong>
-          <small>{detail}</small>
-        </div>
-      </div>
-      {visual ? <div className="metric-visual">{visual}</div> : null}
-    </article>
-  )
-}
-
-function MetricMiniBars({ samples, tone }: { samples: number[]; tone: string }) {
-  const displaySamples = samples.slice(-18)
-  const max = Math.max(...displaySamples, 1)
-
-  return (
-    <div className={`metric-mini-bars tone-${tone}`} aria-hidden="true">
-      {Array.from({ length: 18 }).map((_, index) => {
-        const value = displaySamples[index - (18 - displaySamples.length)] ?? 0
-        const height = value > 0 ? Math.max(12, Math.round((value / max) * 100)) : 6
-        return <span key={index} style={{ height: `${height}%` }} />
-      })}
+    <div className="header-indicators" aria-label="Run summary">
+      <span>
+        <span className="indicator-dot is-online" />
+        Online UEs
+        <strong>{state ? `${activeUsers}/${plannedUsers}` : '--'}</strong>
+      </span>
+      <span>
+        <span className="indicator-dot is-throughput" />
+        Throughput
+        <strong>{throughput}</strong>
+      </span>
     </div>
   )
 }
@@ -1099,14 +998,6 @@ function failedPercent(state: DemoState) {
 
 function prioritizedCount(state: DemoState) {
   return state.counters.protected_users + state.counters.temporary_grants
-}
-
-function p50Latency(state: DemoState) {
-  const latencies = state.users
-    .filter((user) => user.active)
-    .map((user) => user.last_latency_ms ?? 0)
-    .filter((value) => value > 0)
-  return percentile(latencies, 0.5)
 }
 
 function percentile(samples: number[], fraction: number) {
