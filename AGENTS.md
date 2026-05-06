@@ -35,3 +35,9 @@ Git history is not available in this checkout, so no repository-specific commit 
 
 ## Security & Configuration Notes
 Do not trust request input blindly: this service drives privileged network shaping commands. Review changes to `flows.json` carefully, avoid hardcoding environment-specific interfaces, and document any requirement for root, Linux networking tools, or host capabilities in the PR.
+
+<!-- SPECKIT START -->
+For governance requirements, read `.specify/memory/constitution.md`.
+For additional context about technologies to be used, project structure,
+shell commands, and other important information, read the current plan.
+<!-- SPECKIT END -->
