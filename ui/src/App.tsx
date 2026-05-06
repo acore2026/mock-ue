@@ -9,7 +9,6 @@ import {
   Gauge,
   Smartphone,
   Play,
-  Plus,
   Radio,
   RefreshCcw,
   RotateCcw,
@@ -21,7 +20,6 @@ import {
   fetchDemoState,
   prepareDemoSession,
   resetDemoRun,
-  spawnDemoUsers,
   startDemoRun,
   stopDemoRun,
   subscribeDemoStream,
@@ -30,12 +28,14 @@ import {
   Area,
   AreaChart,
   CartesianGrid,
+  Cell,
   ComposedChart,
   Line,
+  Pie,
+  PieChart,
   ReferenceArea,
   ReferenceLine,
   ResponsiveContainer,
-  Scatter,
   Tooltip,
   XAxis,
   YAxis,
@@ -53,7 +53,7 @@ const strategies: Array<{ label: string; value: StrategyName; short: string; ton
 const filterOptions = ['all', 'uploading', 'prioritized', 'public', 'waiting'] as const
 const sortOptions = ['latency', 'ue', 'status'] as const
 
-type PendingAction = 'prepare' | 'run' | 'spawn' | 'stop' | 'reset' | 'refresh'
+type PendingAction = 'mode' | 'run' | 'stop' | 'reset' | 'refresh'
 type PendingActions = Record<PendingAction, boolean>
 type BoardFilter = (typeof filterOptions)[number]
 type BoardSort = (typeof sortOptions)[number]
@@ -72,9 +72,8 @@ type HistoryPoint = {
 }
 
 const initialPendingState: PendingActions = {
-  prepare: false,
+  mode: false,
   run: false,
-  spawn: false,
   stop: false,
   reset: false,
   refresh: false,
@@ -87,14 +86,10 @@ function App() {
     <div className="page-shell">
       <motion.div className="page-frame" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.28 }}>
         <DashboardHeader
-          draftStrategy={liveState.draftStrategy}
           state={liveState.state}
           loading={liveState.loading}
           pending={liveState.pending}
-          onDraftStrategyChange={liveState.setDraftStrategy}
-          onPrepare={liveState.prepareSession}
           onRun={liveState.startRun}
-          onSpawn={liveState.spawnUsers}
           onStop={liveState.stopRun}
           onReset={liveState.resetRun}
           onRefresh={liveState.refreshState}
@@ -109,7 +104,13 @@ function App() {
           ) : null}
         </AnimatePresence>
 
-        <StatusBar state={liveState.state} streamStatus={liveState.streamStatus} lastUpdateAt={liveState.lastUpdateAt} />
+        <StrategyComparison
+          state={liveState.state}
+          historyPoints={liveState.historyPoints}
+          pending={liveState.pending.mode}
+          pendingStrategy={liveState.pendingStrategy}
+          onModeSelect={liveState.switchMode}
+        />
         <KpiStrip state={liveState.state} historyPoints={liveState.historyPoints} />
         <DashboardBody
           state={liveState.state}
@@ -117,23 +118,21 @@ function App() {
           resultByID={liveState.resultByID}
           latencyHistoryByID={liveState.latencyHistoryByID}
         />
-        <StrategyComparison state={liveState.state} historyPoints={liveState.historyPoints} />
       </motion.div>
     </div>
   )
 }
 
 function useDemoLiveState() {
-  const [draftStrategy, setDraftStrategy] = useState<StrategyName>('no_optimization')
   const [state, setState] = useState<DemoState | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [streamStatus, setStreamStatus] = useState<DemoStreamStatus>('connecting')
   const [pending, setPending] = useState<PendingActions>(initialPendingState)
+  const [pendingStrategy, setPendingStrategy] = useState<StrategyName | null>(null)
   const [resultByID, setResultByID] = useState<Record<string, UploadResult>>({})
   const [latencyHistoryByID, setLatencyHistoryByID] = useState<Record<string, number[]>>({})
   const [historyPoints, setHistoryPoints] = useState<HistoryPoint[]>([])
-  const [lastUpdateAt, setLastUpdateAt] = useState<Date | null>(null)
   const recordedAttemptsRef = useRef<Record<string, number>>({})
 
   function setActionPending(action: PendingAction, value: boolean) {
@@ -153,23 +152,13 @@ function useDemoLiveState() {
   }
 
   function applyState(nextState: DemoState | null) {
-    setLastUpdateAt(new Date())
-
     if (!nextState) {
       setState(null)
-      setDraftStrategy('no_optimization')
       resetSandboxState()
       return
     }
 
-    const appliedStrategy = state?.strategy
     setState(nextState)
-    setDraftStrategy((currentDraft) => {
-      if (!appliedStrategy || currentDraft === appliedStrategy) {
-        return nextState.strategy
-      }
-      return currentDraft
-    })
 
     if (nextState.running || nextState.counters.active_users > 0) {
       setHistoryPoints((current) => [...current, makeHistoryPoint(nextState, current.length)].slice(-90))
@@ -177,6 +166,29 @@ function useDemoLiveState() {
 
     if (!nextState.running && nextState.counters.active_users === 0) {
       resetSandboxState()
+    }
+  }
+
+  async function switchMode(strategy: StrategyName) {
+    if (pending.mode || (state?.strategy === strategy && state.running)) {
+      return
+    }
+
+    setActionPending('mode', true)
+    setPendingStrategy(strategy)
+    setError(null)
+    resetSandboxState()
+
+    try {
+      const preparedState = await prepareDemoSession(strategy)
+      applyState(preparedState)
+      const startedState = await startDemoRun()
+      applyState(startedState)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to switch demo mode')
+    } finally {
+      setPendingStrategy(null)
+      setActionPending('mode', false)
     }
   }
 
@@ -277,21 +289,17 @@ function useDemoLiveState() {
   }
 
   return {
-    draftStrategy,
     error,
     historyPoints,
     latencyHistoryByID,
-    lastUpdateAt,
     loading,
     pending,
     resultByID,
     state,
     streamStatus,
-    setDraftStrategy,
-    prepareSession: () =>
-      runAction('prepare', () => prepareDemoSession(draftStrategy), 'Failed to prepare demo session'),
+    pendingStrategy,
+    switchMode,
     startRun: () => runAction('run', startDemoRun, 'Failed to start demo run'),
-    spawnUsers: () => runAction('spawn', spawnDemoUsers, 'Failed to add users'),
     stopRun: () => runAction('stop', stopDemoRun, 'Failed to stop demo run'),
     resetRun: () => runAction('reset', resetDemoRun, 'Failed to reset demo run'),
     refreshState: () => loadState(),
@@ -299,30 +307,24 @@ function useDemoLiveState() {
 }
 
 function DashboardHeader({
-  draftStrategy,
   state,
   loading,
   pending,
-  onDraftStrategyChange,
-  onPrepare,
   onRun,
-  onSpawn,
   onStop,
   onReset,
   onRefresh,
 }: {
-  draftStrategy: StrategyName
   state: DemoState | null
   loading: boolean
   pending: PendingActions
-  onDraftStrategyChange: (value: StrategyName) => void
-  onPrepare: () => Promise<void>
   onRun: () => Promise<void>
-  onSpawn: () => Promise<void>
   onStop: () => Promise<void>
   onReset: () => Promise<void>
   onRefresh: () => Promise<void>
 }) {
+  const controlsLocked = pending.mode || pending.run || pending.stop || pending.reset
+
   return (
     <header className="dashboard-header">
       <div className="brand-lockup">
@@ -331,78 +333,18 @@ function DashboardHeader({
         </div>
         <div className="brand-line">
           <h1>QoS Uplink Strategy Monitor</h1>
-          <span>Real-time UE Performance Simulation</span>
         </div>
       </div>
 
       <div className="header-controls" aria-label="Dashboard controls">
-        <span className="control-label">Strategy</span>
-        <div className="strategy-toggle" role="group" aria-label="Strategy">
-          {strategies.map((item) => (
-            <button
-              key={item.value}
-              className={item.value === draftStrategy ? 'is-selected' : ''}
-              type="button"
-              onClick={() => onDraftStrategyChange(item.value)}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-
         <div className="action-row">
-          <ActionButton label="Prepare" pendingLabel="Preparing" onClick={onPrepare} disabled={pending.prepare} pending={pending.prepare} icon={<RefreshCcw size={14} />} />
-          <ActionButton label="Start" pendingLabel="Starting" onClick={onRun} disabled={!state || Boolean(state.running) || pending.run} pending={pending.run} icon={<Play size={14} />} primary />
-          <ActionButton label="Add UEs" pendingLabel="Adding" onClick={onSpawn} disabled={!state?.running || pending.spawn} pending={pending.spawn} icon={<Plus size={14} />} />
-          <ActionButton label="Stop" pendingLabel="Stopping" onClick={onStop} disabled={!state?.running || pending.stop} pending={pending.stop} icon={<StopCircle size={14} />} danger />
-          <ActionButton label="Reset" pendingLabel="Resetting" onClick={onReset} disabled={!state || pending.reset} pending={pending.reset} icon={<RotateCcw size={14} />} />
-          <ActionButton label={loading ? 'Syncing' : 'Refresh'} pendingLabel="Refreshing" onClick={onRefresh} disabled={pending.refresh} pending={pending.refresh} icon={<RefreshCcw size={14} />} iconOnly />
+          <ActionButton label="Start" pendingLabel="Starting" onClick={onRun} disabled={!state || Boolean(state.running) || controlsLocked} pending={pending.run} icon={<Play size={14} />} primary />
+          <ActionButton label="Stop" pendingLabel="Stopping" onClick={onStop} disabled={!state?.running || controlsLocked} pending={pending.stop} icon={<StopCircle size={14} />} danger />
+          <ActionButton label="Reset" pendingLabel="Resetting" onClick={onReset} disabled={!state || controlsLocked} pending={pending.reset} icon={<RotateCcw size={14} />} />
+          <ActionButton label={loading ? 'Syncing' : 'Refresh'} pendingLabel="Refreshing" onClick={onRefresh} disabled={pending.refresh || pending.mode} pending={pending.refresh} icon={<RefreshCcw size={14} />} iconOnly />
         </div>
       </div>
     </header>
-  )
-}
-
-function StatusBar({
-  state,
-  streamStatus,
-  lastUpdateAt,
-}: {
-  state: DemoState | null
-  streamStatus: DemoStreamStatus
-  lastUpdateAt: Date | null
-}) {
-  const [nowMS, setNowMS] = useState(() => Date.now())
-  const streamConnected = streamStatus === 'connected'
-  const activeStrategy = state?.strategy ?? 'no_optimization'
-
-  useEffect(() => {
-    if (!state?.running) {
-      return
-    }
-    const timerID = window.setInterval(() => setNowMS(Date.now()), 1000)
-    return () => window.clearInterval(timerID)
-  }, [state?.running])
-
-  return (
-    <section className="status-bar" aria-label="Run status">
-      <div className="status-stream">
-        <span className={`live-dot ${streamConnected ? 'is-live' : ''}`} />
-        <strong>Live Stream {streamConnected ? 'Connected' : streamStatus}</strong>
-        <span>{streamConnected ? 'Live' : '--'}</span>
-      </div>
-
-      <div className="status-meta">
-        <span>Run State:</span>
-        <strong className={state?.running ? 'state-running' : ''}>{state?.running ? 'RUNNING' : state ? 'READY' : 'NO SESSION'}</strong>
-        <span>Strategy:</span>
-        <strong>{labelForStrategy(activeStrategy)}</strong>
-        <span>Elapsed:</span>
-        <strong>{formatElapsed(state, nowMS)}</strong>
-        <span>Last Update:</span>
-        <strong>{formatTime(lastUpdateAt)}</strong>
-      </div>
-    </section>
   )
 }
 
@@ -552,45 +494,88 @@ function DashboardBody({
 function StrategyComparison({
   state,
   historyPoints,
+  pending,
+  pendingStrategy,
+  onModeSelect,
 }: {
   state: DemoState | null
   historyPoints: HistoryPoint[]
+  pending: boolean
+  pendingStrategy: StrategyName | null
+  onModeSelect: (strategy: StrategyName) => Promise<void>
 }) {
-  const activeStrategy = state?.strategy ?? 'no_optimization'
+  const activeStrategy = state?.strategy ?? null
   const activeUsers = state?.counters.active_users ?? 0
   const latestPoint = historyPoints.at(-1)
-  const activeGood = activeUsers > 0 && state ? goodLatencyPercent(state) : null
-  const activeFailed = activeUsers > 0 && state ? failedPercent(state) : null
 
   return (
-    <section className="strategy-comparison" aria-label="Strategy comparison">
+    <section className="strategy-comparison" aria-label="Mode selection" role="radiogroup">
       {strategies.map((strategy) => {
         const scenario = scenarioStyle(strategy.value)
-        const isActive = strategy.value === activeStrategy
+        const isApplied = strategy.value === activeStrategy
+        const isSwitching = pending && pendingStrategy === strategy.value
+        const isSelected = isApplied || isSwitching
+        const comparison = strategyComparisonMetrics(strategy.value, {
+          isActive: isApplied,
+          latestPoint,
+          state,
+          activeUsers,
+        })
         return (
-          <article key={strategy.value} className={`comparison-card tone-${scenario.tone} ${isActive ? 'is-active' : ''}`}>
+          <button
+            key={strategy.value}
+            className={`comparison-card tone-${scenario.tone} ${isSelected ? 'is-active' : ''} ${isSwitching ? 'is-switching' : ''}`}
+            type="button"
+            role="radio"
+            aria-checked={isSelected}
+            aria-label={`Switch to ${strategy.label}`}
+            disabled={pending}
+            onClick={() => void onModeSelect(strategy.value)}
+          >
             <div className="comparison-head">
+              <span className="comparison-radio" aria-hidden="true" />
               <div className="comparison-icon">{scenario.icon}</div>
-              <div>
-                <h3>{strategy.label}</h3>
-                <p>{scenario.short}</p>
+              <h3>{strategy.label}</h3>
+              {isSwitching ? <span className="active-badge">Switching</span> : isApplied ? <span className="active-badge">Active</span> : null}
+            </div>
+
+            <div className="comparison-body">
+              <StrategyMiniTrend tone={scenario.tone} points={comparison.trend} />
+
+              <div className="comparison-metrics">
+                <MetricInline label="Good" value={comparison.good} tone="green" />
+                <MetricInline label="P50 Latency" value={comparison.p50} tone="purple" />
+                <MetricInline label="Failed" value={comparison.failed} tone="red" />
               </div>
-              {isActive ? <span className="active-badge">Active</span> : null}
             </div>
 
-            <SparkBars samples={isActive ? latestPoint?.latencies ?? [] : []} />
-
-            <div className="comparison-metrics">
-              <MetricInline label="Good" value={isActive && activeGood !== null ? `${activeGood}%` : '--'} tone="green" />
-              <MetricInline label="P50 Latency" value={isActive && latestPoint ? formatLatency(latestPoint.p50) : '--'} tone="purple" />
-              <MetricInline label="Failed" value={isActive && activeFailed !== null ? `${activeFailed}%` : '--'} tone="red" />
-            </div>
-
-            <p className="comparison-note">{scenario.expectation}</p>
-          </article>
+            <p className="comparison-note">
+              <span />
+              {scenario.expectation}
+            </p>
+          </button>
         )
       })}
     </section>
+  )
+}
+
+function StrategyMiniTrend({
+  tone,
+  points,
+}: {
+  tone: 'blue' | 'orange' | 'purple'
+  points: number[]
+}) {
+  const pathA = sparkPath(points)
+  const pathB = sparkPath(points.map((value, index) => Math.max(0, value - 10 - index * 1.5)))
+
+  return (
+    <svg className={`strategy-mini-trend tone-${tone}`} viewBox="0 0 180 38" preserveAspectRatio="none" aria-hidden="true">
+      <path className="trend-fill" d={`${pathA} L 180 38 L 0 38 Z`} />
+      <path className="trend-line-primary" d={pathA} />
+      <path className="trend-line-secondary" d={pathB} />
+    </svg>
   )
 }
 
@@ -601,6 +586,58 @@ function MetricInline({ label, value, tone }: { label: string; value: ReactNode;
       <strong>{value}</strong>
     </div>
   )
+}
+
+function strategyComparisonMetrics(
+  strategy: StrategyName,
+  context: {
+    isActive: boolean
+    latestPoint?: HistoryPoint
+    state: DemoState | null
+    activeUsers: number
+  },
+) {
+  const guide = strategyGuide(strategy)
+  if (context.isActive && context.state && context.activeUsers > 0) {
+    return {
+      good: `${goodLatencyPercent(context.state)}%`,
+      p50: context.latestPoint ? formatLatency(context.latestPoint.p50) : '--',
+      failed: `${failedPercent(context.state)}%`,
+      trend: context.latestPoint?.latencies.length ? normalizeTrend(context.latestPoint.latencies) : guide.trend,
+    }
+  }
+  return {
+    good: `${guide.good}%`,
+    p50: `${guide.p50} ms`,
+    failed: `${guide.failed}%`,
+    trend: guide.trend,
+  }
+}
+
+function strategyGuide(strategy: StrategyName) {
+  switch (strategy) {
+    case 'standard_gbr':
+      return {
+        good: 52,
+        p50: 158,
+        failed: 12,
+        trend: [34, 39, 44, 47, 50, 51, 54, 55, 57, 60, 61, 65],
+      }
+    case 'dynamic_qos':
+      return {
+        good: 68,
+        p50: 132,
+        failed: 10,
+        trend: [44, 48, 53, 55, 58, 61, 63, 64, 67, 69, 71, 74],
+      }
+    default:
+      return {
+        good: 28,
+        p50: 245,
+        failed: 24,
+        trend: [52, 57, 61, 64, 69, 72, 76, 82, 88, 95, 104, 112],
+      }
+  }
 }
 
 function AnalyticsColumn({
@@ -614,44 +651,43 @@ function AnalyticsColumn({
   const delayed = state?.counters.delayed_users ?? 0
   const failed = state?.counters.failed_users ?? 0
   const treatments = state ? treatmentCounts(state.users) : { public: 0, reserved: 0, temporary: 0 }
+  const activeUsers = state?.counters.active_users ?? 0
+  const outcomeData = [
+    { name: 'Good', value: good, color: '#22a34a' },
+    { name: 'Delayed', value: delayed, color: '#f59e0b' },
+    { name: 'High', value: failed, color: '#ef4444' },
+  ]
+  const treatmentTotal = treatments.public + treatments.temporary + treatments.reserved
+  const treatmentPct = (value: number) => (treatmentTotal > 0 ? Math.round((value / treatmentTotal) * 100) : 0)
   const chartMaxUsers = Math.max(state?.counters.planned_users ?? 0, ...historyPoints.map((point) => point.active), 1)
-  const congestionPoint = historyPoints.find((point) => point.degradedPct + point.highPct > 0)?.active ?? null
-  const latencyCloud = historyPoints.flatMap((point) =>
-    point.latencies.map((latency, index) => ({
-      id: `${point.tick}-${index}`,
-      active: point.active,
-      latency: clampChartLatency(latency),
-      rawLatency: latency,
-    })),
-  )
+  const congestionPoint = historyPoints.find((point) => point.degradedPct + point.highPct > 0)?.tick ?? null
 
   return (
     <section className="analytics-column" aria-label="Simulation analytics">
-      <Panel title="Load & Latency Trend" meta="Latest run">
+      <Panel title="Load & Latency Trend">
         <div className="chart-shell trend-shell">
           <div className="chart-legend">
-            <span className="legend-item cloud">UE latency samples</span>
+            <span className="legend-item blue">Active UEs</span>
             <span className="legend-item purple">P50 latency</span>
-            <span className="legend-item red">P99 latency</span>
           </div>
           <div className="empty-chart">
             <div className="line-chart-wrap">
               {historyPoints.length ? (
-                <ResponsiveContainer width="100%" height="100%">
+                <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <ComposedChart data={historyPoints} margin={{ top: 8, right: 10, bottom: 4, left: -18 }}>
                     <CartesianGrid stroke="#e5edf7" strokeDasharray="3 3" vertical={false} />
-                    <XAxis dataKey="active" type="number" name="Active UEs" tick={{ fontSize: 10, fill: '#667085' }} tickLine={false} axisLine={false} allowDecimals={false} domain={[0, chartMaxUsers]} />
-                    <YAxis dataKey="p99" type="number" domain={[0, 1000]} ticks={[0, 150, 300, 1000]} tickFormatter={formatLatencyAxis} tick={{ fontSize: 10, fill: '#667085' }} tickLine={false} axisLine={false} />
-                    <Tooltip contentStyle={{ border: '1px solid #dce3ef', borderRadius: 8, fontSize: 12 }} formatter={formatChartTooltip} labelFormatter={(value) => `${value} active UEs`} />
-                    <ReferenceArea y1={0} y2={150} fill="#22a34a" fillOpacity={0.08} />
-                    <ReferenceArea y1={150} y2={300} fill="#f59e0b" fillOpacity={0.1} />
-                    <ReferenceArea y1={300} y2={1000} fill="#ef4444" fillOpacity={0.08} />
-                    <ReferenceLine y={150} stroke="#22a34a" strokeDasharray="4 4" strokeOpacity={0.5} />
-                    <ReferenceLine y={300} stroke="#ef4444" strokeDasharray="4 4" strokeOpacity={0.45} />
+                    <XAxis dataKey="tick" tickFormatter={formatTickLabel} tick={{ fontSize: 10, fill: '#667085' }} tickLine={false} axisLine={false} allowDecimals={false} />
+                    <YAxis yAxisId="users" dataKey="active" type="number" domain={[0, chartMaxUsers]} tick={{ fontSize: 10, fill: '#667085' }} tickLine={false} axisLine={false} allowDecimals={false} />
+                    <YAxis yAxisId="latency" orientation="right" type="number" domain={[0, 320]} ticks={[0, 150, 300]} tickFormatter={formatLatencyAxis} tick={{ fontSize: 10, fill: '#667085' }} tickLine={false} axisLine={false} />
+                    <Tooltip contentStyle={{ border: '1px solid #dce3ef', borderRadius: 8, fontSize: 12 }} formatter={formatTrendTooltip} labelFormatter={(value) => formatTickLabel(Number(value))} />
+                    <ReferenceArea yAxisId="latency" y1={0} y2={150} fill="#22a34a" fillOpacity={0.08} />
+                    <ReferenceArea yAxisId="latency" y1={150} y2={300} fill="#f59e0b" fillOpacity={0.1} />
+                    <ReferenceArea yAxisId="latency" y1={300} y2={320} fill="#ef4444" fillOpacity={0.08} />
+                    <ReferenceLine yAxisId="latency" y={150} stroke="#22a34a" strokeDasharray="4 4" strokeOpacity={0.5} />
+                    <ReferenceLine yAxisId="latency" y={300} stroke="#ef4444" strokeDasharray="4 4" strokeOpacity={0.45} />
                     {congestionPoint ? <ReferenceLine x={congestionPoint} stroke="#0f172a" strokeDasharray="3 5" strokeOpacity={0.45} label={{ value: 'Contention', position: 'insideTop', fill: '#475467', fontSize: 10 }} /> : null}
-                    <Scatter data={latencyCloud} dataKey="latency" name="UE latency" fill="#2563eb" fillOpacity={0.22} line={false} isAnimationActive={false} />
-                    <Line type="monotone" dataKey="p50" name="P50 latency" stroke="#7c3aed" strokeWidth={2.2} dot={false} isAnimationActive={false} />
-                    <Line type="monotone" dataKey="p99" name="P99 latency" stroke="#ef4444" strokeWidth={2.8} dot={false} isAnimationActive={false} />
+                    <Line yAxisId="users" type="monotone" dataKey="active" name="Active UEs" stroke="#2563eb" strokeWidth={2.7} dot={false} isAnimationActive={false} />
+                    <Line yAxisId="latency" type="monotone" dataKey="p50" name="P50 latency" stroke="#7c3aed" strokeWidth={2.3} dot={false} isAnimationActive={false} />
                   </ComposedChart>
                 </ResponsiveContainer>
               ) : (
@@ -659,7 +695,6 @@ function AnalyticsColumn({
               )}
             </div>
             <div className="threshold-stack">
-              <span>1000ms+</span>
               <span>High (&gt;300ms)</span>
               <span>Degraded (150-300ms)</span>
               <span>Good (&lt;=150ms)</span>
@@ -668,15 +703,15 @@ function AnalyticsColumn({
         </div>
       </Panel>
 
-      <Panel title="Upload Outcome Distribution" meta="Current split">
+      <Panel title="Upload Outcome Distribution">
         <div className="outcome-layout">
           <div className="area-chart-wrap">
             {historyPoints.length ? (
-              <ResponsiveContainer width="100%" height="100%">
+              <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                 <AreaChart data={historyPoints} margin={{ top: 6, right: 6, bottom: 0, left: -24 }}>
-                  <XAxis dataKey="active" type="number" tick={{ fontSize: 10, fill: '#667085' }} tickLine={false} axisLine={false} allowDecimals={false} domain={[0, chartMaxUsers]} />
+                  <XAxis dataKey="tick" tickFormatter={formatTickLabel} tick={{ fontSize: 10, fill: '#667085' }} tickLine={false} axisLine={false} allowDecimals={false} />
                   <YAxis domain={[0, 100]} ticks={[0, 50, 100]} tickFormatter={(value) => `${value}%`} tick={{ fontSize: 10, fill: '#667085' }} tickLine={false} axisLine={false} />
-                  <Tooltip contentStyle={{ border: '1px solid #dce3ef', borderRadius: 8, fontSize: 12 }} formatter={(value, name) => [`${Number(value).toFixed(0)}%`, name]} labelFormatter={(value) => `${value} active UEs`} />
+                  <Tooltip contentStyle={{ border: '1px solid #dce3ef', borderRadius: 8, fontSize: 12 }} formatter={(value, name) => [`${Number(value).toFixed(0)}%`, name]} labelFormatter={(value) => formatTickLabel(Number(value))} />
                   <Area type="monotone" dataKey="goodPct" name="Good" stackId="1" stroke="#22a34a" fill="#86d993" isAnimationActive={false} />
                   <Area type="monotone" dataKey="degradedPct" name="Degraded" stackId="1" stroke="#f59e0b" fill="#fbd38d" isAnimationActive={false} />
                   <Area type="monotone" dataKey="highPct" name="High" stackId="1" stroke="#ef4444" fill="#fca5a5" isAnimationActive={false} />
@@ -684,6 +719,24 @@ function AnalyticsColumn({
               </ResponsiveContainer>
             ) : (
               <ChartEmpty label="Outcome history is empty" />
+            )}
+          </div>
+          <div className="donut-chart-wrap">
+            {activeUsers > 0 ? (
+              <>
+                <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
+                  <PieChart>
+                    <Pie data={outcomeData} dataKey="value" nameKey="name" innerRadius={23} outerRadius={36} paddingAngle={1} stroke="none" isAnimationActive={false}>
+                      {outcomeData.map((entry) => (
+                        <Cell key={entry.name} fill={entry.color} />
+                      ))}
+                    </Pie>
+                  </PieChart>
+                </ResponsiveContainer>
+                <span>{state ? goodLatencyPercent(state) : 0}%</span>
+              </>
+            ) : (
+              <span>--</span>
             )}
           </div>
           <div className="outcome-list">
@@ -694,16 +747,17 @@ function AnalyticsColumn({
         </div>
       </Panel>
 
-      <Panel title="Treatment Allocation" meta="Current">
+      <Panel title="Treatment Allocation">
         <div className="allocation-bar" aria-label="Treatment allocation">
-          <span className="public" style={{ flexGrow: treatments.public || 0.0001 }}>Public</span>
-          <span className="temporary" style={{ flexGrow: treatments.temporary || 0.0001 }}>Temp</span>
-          <span className="reserved" style={{ flexGrow: treatments.reserved || 0.0001 }}>Reserved</span>
+          <span className="public" style={{ flexGrow: treatments.public || 0.0001 }}>Public ({treatmentPct(treatments.public)}%)</span>
+          <span className="temporary" style={{ flexGrow: treatments.temporary || 0.0001 }}>Temporary ({treatmentPct(treatments.temporary)}%)</span>
+          <span className="reserved" style={{ flexGrow: treatments.reserved || 0.0001 }}>Reserved ({treatmentPct(treatments.reserved)}%)</span>
         </div>
         <div className="allocation-labels">
           <strong>{treatments.public} public</strong>
           <strong>{treatments.temporary} temp</strong>
           <strong>{treatments.reserved} reserved</strong>
+          <strong>Total Active UEs: {activeUsers}</strong>
         </div>
       </Panel>
     </section>
@@ -735,7 +789,6 @@ const DeviceBoard = memo(function DeviceBoard({
       <div className="panel-title-row">
         <div>
           <h2>UE Activity Board</h2>
-          <p>{state ? `${visibleUsers.length} visible UEs` : 'No prepared session'}</p>
         </div>
         <div className="sort-control">
           <span>Sort By</span>
@@ -852,13 +905,12 @@ const DeviceCard = memo(function DeviceCard({
   )
 })
 
-function Panel({ title, meta, children }: { title: string; meta: string; children: ReactNode }) {
+function Panel({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="panel analytics-panel">
       <div className="panel-title-row">
         <div>
           <h2>{title}</h2>
-          <p>{meta}</p>
         </div>
         <CircleDot size={14} />
       </div>
@@ -931,10 +983,6 @@ function ChartEmpty({ label }: { label: string }) {
   return <div className="chart-empty-label">{label}</div>
 }
 
-function labelForStrategy(strategy: StrategyName) {
-  return strategies.find((item) => item.value === strategy)?.label ?? strategy
-}
-
 function labelForFilter(filter: BoardFilter) {
   switch (filter) {
     case 'all':
@@ -962,7 +1010,7 @@ function labelForSort(sortMode: BoardSort) {
 }
 
 function ueLabel(user: DemoUser) {
-  return `imsi-208930${String(user.index).padStart(9, '0')}`
+  return `imsi-20893-${String(user.index).padStart(3, '0')}`
 }
 
 function treatmentMeta(user: DemoUser): { short: string; label: string; icon: ReactNode } {
@@ -980,33 +1028,6 @@ function treatmentMeta(user: DemoUser): { short: string; label: string; icon: Re
 
 function formatMbps(value: number) {
   return `${value.toFixed(0)} Mbps`
-}
-
-function formatTime(value: Date | null) {
-  if (!value) {
-    return '--:--:--'
-  }
-  return value.toLocaleTimeString([], {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  })
-}
-
-function formatElapsed(state: DemoState | null, nowMS: number) {
-  if (!state) {
-    return '--:--:--'
-  }
-  const startMS = Date.parse(state.prepared_at)
-  if (!Number.isFinite(startMS)) {
-    return '00:00:00'
-  }
-  const elapsedSeconds = state.running ? Math.max(0, Math.floor((nowMS - startMS) / 1000)) : 0
-  const hours = Math.floor(elapsedSeconds / 3600)
-  const minutes = Math.floor((elapsedSeconds % 3600) / 60)
-  const seconds = elapsedSeconds % 60
-  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
 }
 
 function formatLatency(value: number | null | undefined) {
@@ -1030,9 +1051,42 @@ function formatLatencyAxis(value: number) {
   return value >= 1000 ? '1000ms+' : `${value}ms`
 }
 
-function formatChartTooltip(value: unknown, name: unknown): [ReactNode, string] {
+function formatTickLabel(value: number) {
+  if (!Number.isFinite(value)) {
+    return ''
+  }
+  return `T+${value}`
+}
+
+function formatTrendTooltip(value: unknown, name: unknown): [ReactNode, string] {
   const numeric = Number(value)
-  return [Number.isFinite(numeric) ? formatLatency(numeric) : String(value), String(name)]
+  const label = String(name)
+  if (!Number.isFinite(numeric)) {
+    return [String(value), label]
+  }
+  if (label === 'Active UEs') {
+    return [numeric.toFixed(0), label]
+  }
+  return [formatLatency(numeric), label]
+}
+
+function sparkPath(values: number[]) {
+  const safeValues = values.length > 1 ? values : [0, 0]
+  const max = Math.max(...safeValues, 1)
+  const min = Math.min(...safeValues, 0)
+  const range = Math.max(max - min, 1)
+  return safeValues
+    .map((value, index) => {
+      const x = (index / (safeValues.length - 1)) * 180
+      const y = 34 - ((value - min) / range) * 28
+      return `${index === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`
+    })
+    .join(' ')
+}
+
+function normalizeTrend(values: number[]) {
+  const samples = values.slice(-12)
+  return samples.length > 1 ? samples : [0, 0]
 }
 
 function goodLatencyPercent(state: DemoState) {
