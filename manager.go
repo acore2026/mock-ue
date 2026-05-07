@@ -544,22 +544,28 @@ func (m *ScenarioManager) startLocked() error {
 	startedAt := time.Now()
 	runEndsAt := startedAt.Add(time.Duration(m.config.DurationS) * time.Second)
 	m.metrics.markStarted(startedAt)
-	m.runEndsAt = &runEndsAt
+	if m.config.DurationS > 0 {
+		m.runEndsAt = &runEndsAt
+	} else {
+		m.runEndsAt = nil
+	}
 	for _, client := range m.runtime.Clients {
-		if err := m.startClientLocked(client, time.Until(runEndsAt)); err != nil {
+		if err := m.startClientLocked(client, m.remainingRunDurationLocked()); err != nil {
 			_ = m.stopLocked()
 			return err
 		}
 	}
 
-	go func(deadline time.Time) {
-		time.Sleep(time.Until(deadline))
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		if m.server != nil {
-			_ = m.stopLocked()
-		}
-	}(runEndsAt)
+	if m.config.DurationS > 0 {
+		go func(deadline time.Time) {
+			time.Sleep(time.Until(deadline))
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			if m.server != nil {
+				_ = m.stopLocked()
+			}
+		}(runEndsAt)
+	}
 	return nil
 }
 
@@ -766,10 +772,29 @@ func (m *ScenarioManager) addClientLockedWithIndex(profile ProfileName, index in
 		return ClientRuntime{}, errors.New("scenario not initialized")
 	}
 
+	clientID := clientName(index)
+	if existing, ok := m.clientByIDLocked(clientID); ok {
+		if existing.Profile != profile {
+			if err := m.applyClientProfileLocked(existing, profile); err != nil {
+				return ClientRuntime{}, err
+			}
+			existing.Profile = profile
+		}
+		if m.server != nil {
+			if _, running := m.clients[existing.ID]; !running {
+				if err := m.startClientLocked(existing, m.remainingRunDurationLocked()); err != nil {
+					return ClientRuntime{}, err
+				}
+			}
+		}
+		m.metrics.setClient(existing.ID, existing.IP, profile)
+		return existing, nil
+	}
+
 	client := ClientRuntime{
-		ID:        clientName(index),
+		ID:        clientID,
 		IP:        clientIPForIndex(index),
-		Namespace: clientName(index),
+		Namespace: clientID,
 		LocalIF:   "eth0",
 		RouterIF:  routerVethName(index),
 		Profile:   profile,
@@ -803,7 +828,7 @@ func (m *ScenarioManager) addClientLockedWithIndex(profile ProfileName, index in
 }
 
 func (m *ScenarioManager) startClientLocked(client ClientRuntime, duration time.Duration) error {
-	if duration <= 0 {
+	if duration < 0 {
 		return errors.New("run is already ending")
 	}
 

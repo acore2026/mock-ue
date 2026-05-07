@@ -60,7 +60,7 @@ func runHTTPClient(cfg ClientRunConfig) error {
 	if cfg.Interval <= 0 {
 		cfg.Interval = time.Second
 	}
-	if cfg.Duration <= 0 {
+	if cfg.Duration < 0 {
 		cfg.Duration = 60 * time.Second
 	}
 
@@ -75,17 +75,18 @@ func runHTTPClient(cfg ClientRunConfig) error {
 	enc := json.NewEncoder(os.Stdout)
 
 	start := time.Now()
+	hasDeadline := cfg.Duration > 0
 	deadline := start.Add(cfg.Duration)
 	initialDelay := clientPhaseOffset(cfg.ClientID, cfg.Interval)
 	if initialDelay > 0 {
 		firstSend := start.Add(initialDelay)
-		if firstSend.After(deadline) {
+		if hasDeadline && firstSend.After(deadline) {
 			return nil
 		}
 		time.Sleep(time.Until(firstSend))
 	}
 	attempt := 0
-	for time.Now().Before(deadline) {
+	for !hasDeadline || time.Now().Before(deadline) {
 		attempt++
 		sample := ClientSample{
 			ClientID: cfg.ClientID,
@@ -103,7 +104,7 @@ func runHTTPClient(cfg ClientRunConfig) error {
 			if err != nil {
 				sample.Error = fmt.Sprintf("control begin failed: %v", err)
 				printSample(enc, sample)
-				if !sleepUntil(deadline, cfg.Interval, reqStart) {
+				if !sleepUntil(deadline, hasDeadline, cfg.Interval, reqStart) {
 					break
 				}
 				continue
@@ -119,7 +120,7 @@ func runHTTPClient(cfg ClientRunConfig) error {
 			sample.Error = err.Error()
 			notifyUploadEnd(controlClient, cfg.ClientID, attempt)
 			printSample(enc, sample)
-			if !sleepUntil(deadline, cfg.Interval, reqStart) {
+			if !sleepUntil(deadline, hasDeadline, cfg.Interval, reqStart) {
 				break
 			}
 			continue
@@ -136,7 +137,7 @@ func runHTTPClient(cfg ClientRunConfig) error {
 			cancel()
 			notifyUploadEnd(controlClient, cfg.ClientID, attempt)
 			printSample(enc, sample)
-			if !sleepUntil(deadline, cfg.Interval, reqStart) {
+			if !sleepUntil(deadline, hasDeadline, cfg.Interval, reqStart) {
 				break
 			}
 			continue
@@ -148,7 +149,7 @@ func runHTTPClient(cfg ClientRunConfig) error {
 		sample.LatencyMS = float64(time.Since(reqStart).Microseconds()) / 1000.0
 		printSample(enc, sample)
 		notifyUploadEnd(controlClient, cfg.ClientID, attempt)
-		if !sleepUntil(deadline, cfg.Interval, reqStart) {
+		if !sleepUntil(deadline, hasDeadline, cfg.Interval, reqStart) {
 			break
 		}
 	}
@@ -159,12 +160,12 @@ func printSample(enc *json.Encoder, sample ClientSample) {
 	_ = enc.Encode(sample)
 }
 
-func sleepUntil(deadline time.Time, interval time.Duration, started time.Time) bool {
+func sleepUntil(deadline time.Time, hasDeadline bool, interval time.Duration, started time.Time) bool {
 	next := started.Add(interval)
 	if !time.Now().Before(next) {
 		next = time.Now().Add(interval)
 	}
-	if next.After(deadline) {
+	if hasDeadline && next.After(deadline) {
 		return false
 	}
 	time.Sleep(time.Until(next))

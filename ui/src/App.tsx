@@ -48,7 +48,7 @@ const strategies: Array<{ label: string; value: StrategyName; short: string; ton
   { label: 'Dynamic QoS', value: 'dynamic_qos', short: 'Temporary grants', tone: 'purple' },
 ]
 
-const filterOptions = ['all', 'uploading', 'prioritized', 'public', 'waiting'] as const
+const filterOptions = ['all', 'uploading', 'prioritized', 'public', 'online'] as const
 const sortOptions = ['latency', 'ue', 'status'] as const
 
 type PendingAction = 'mode' | 'run' | 'stop' | 'reset' | 'refresh'
@@ -347,7 +347,7 @@ function DashboardHeader({
 }
 
 function HeaderIndicators({ state }: { state: DemoState | null }) {
-  const activeUsers = state?.counters.active_users ?? 0
+  const onlineUsers = state?.users.filter(isUserOnline).length ?? 0
   const plannedUsers = state?.users.length ?? 0
   const throughput = state ? formatMbps(state.bandwidth.total_rate_mbps) : '--'
 
@@ -356,7 +356,7 @@ function HeaderIndicators({ state }: { state: DemoState | null }) {
       <span>
         <span className="indicator-dot is-online" />
         Online UEs
-        <strong>{state ? `${activeUsers}/${plannedUsers}` : '--'}</strong>
+        <strong>{state ? `${onlineUsers}/${plannedUsers}` : '--'}</strong>
       </span>
       <span>
         <span className="indicator-dot is-throughput" />
@@ -517,24 +517,24 @@ function strategyGuide(strategy: StrategyName) {
   switch (strategy) {
     case 'standard_gbr':
       return {
-        good: 52,
-        p50: 158,
-        failed: 12,
-        trend: [34, 39, 44, 47, 50, 51, 54, 55, 57, 60, 61, 65],
+        good: 74,
+        p50: 70,
+        failed: 14,
+        trend: [38, 43, 48, 53, 57, 60, 64, 90, 150, 220, 310, 410],
       }
     case 'dynamic_qos':
       return {
-        good: 68,
-        p50: 132,
-        failed: 10,
-        trend: [44, 48, 53, 55, 58, 61, 63, 64, 67, 69, 71, 74],
+        good: 100,
+        p50: 70,
+        failed: 0,
+        trend: [42, 43, 43, 44, 44, 45, 45, 45, 46, 46, 47, 47],
       }
     default:
       return {
-        good: 28,
+        good: 40,
         p50: 245,
-        failed: 24,
-        trend: [52, 57, 61, 64, 69, 72, 76, 82, 88, 95, 104, 112],
+        failed: 40,
+        trend: [46, 51, 58, 66, 76, 91, 112, 138, 171, 212, 260, 310],
       }
   }
 }
@@ -744,13 +744,15 @@ const DeviceCard = memo(function DeviceCard({
   latencyHistory: number[]
   index: number
 }) {
-  const displayStatus = latestResult ? classifyResultStatus(latestResult) : user.status
+  const online = isUserOnline(user)
+  const displayStatus = latestResult ? classifyResultStatus(latestResult) : online && user.status === 'planned' ? 'idle' : user.status
   const displayLatencyMS = latestResult?.latency_ms ?? user.last_latency_ms ?? 0
   const treatment = treatmentMeta(user)
+  const treatmentClass = user.treatment === 'reserved' ? 'treatment-reserved' : 'treatment-public'
 
   return (
     <motion.article
-      className={`ue-card status-${displayStatus} treatment-${user.treatment} ${user.active ? '' : 'is-waiting'}`}
+      className={`ue-card status-${displayStatus} ${treatmentClass} ${online && !user.active ? 'is-online-idle' : ''} ${online ? '' : 'is-offline'}`}
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: 0.05 + (index % 12) * 0.015 }}
@@ -791,11 +793,13 @@ const DeviceCard = memo(function DeviceCard({
           <span className="dot-core" />
         </div>
         <div className="ue-card-metrics">
-          <strong>{user.active ? formatLatency(displayLatencyMS) : 'Waiting'}</strong>
-          <span className={`ue-treatment-badge treatment-${user.treatment}`} title={treatment.label}>
-            {treatment.icon}
-            <span>{treatment.short}</span>
-          </span>
+          <strong>{displayLatencyMS > 0 ? formatLatency(displayLatencyMS) : online ? 'Online' : '--'}</strong>
+          {treatment ? (
+            <span className={`ue-treatment-badge treatment-${user.treatment}`} title={treatment.label}>
+              {treatment.icon}
+              <span>{treatment.short}</span>
+            </span>
+          ) : null}
         </div>
       </div>
 
@@ -892,8 +896,8 @@ function labelForFilter(filter: BoardFilter) {
       return 'Prioritized'
     case 'public':
       return 'Public'
-    case 'waiting':
-      return 'Waiting'
+    case 'online':
+      return 'Online'
   }
 }
 
@@ -912,17 +916,14 @@ function ueLabel(user: DemoUser) {
   return `imsi-20893-${String(user.index).padStart(3, '0')}`
 }
 
-function treatmentMeta(user: DemoUser): { short: string; label: string; icon: ReactNode } {
-  if (!user.active) {
-    return { short: 'WAIT', label: 'Waiting', icon: null }
-  }
-  if (user.treatment === 'temporary_grant') {
-    return { short: 'TEMP', label: 'Temporary grant', icon: <Sparkles size={10} /> }
+function treatmentMeta(user: DemoUser): { short: string; label: string; icon: ReactNode } | null {
+  if (!isUserOnline(user)) {
+    return null
   }
   if (user.treatment === 'reserved') {
     return { short: 'GBR', label: 'Reserved GBR', icon: <Shield size={10} /> }
   }
-  return { short: 'PUB', label: 'Public best effort', icon: null }
+  return null
 }
 
 function formatMbps(value: number) {
@@ -1000,6 +1001,10 @@ function prioritizedCount(state: DemoState) {
   return state.counters.protected_users + state.counters.temporary_grants
 }
 
+function isUserOnline(user: DemoUser) {
+  return user.online ?? user.active
+}
+
 function percentile(samples: number[], fraction: number) {
   if (samples.length === 0) {
     return null
@@ -1059,8 +1064,8 @@ function filterUsers(users: DemoUser[], filter: BoardFilter) {
       return users.filter((user) => user.active && user.treatment !== 'public')
     case 'public':
       return users.filter((user) => user.active && user.treatment === 'public')
-    case 'waiting':
-      return users.filter((user) => !user.active)
+    case 'online':
+      return users.filter(isUserOnline)
     case 'all':
     default:
       return users
@@ -1073,7 +1078,7 @@ function boardFilterCounts(users: DemoUser[]): Record<BoardFilter, number> {
     uploading: users.filter((user) => user.active && (user.uploading || user.running)).length,
     prioritized: users.filter((user) => user.active && user.treatment !== 'public').length,
     public: users.filter((user) => user.active && user.treatment === 'public').length,
-    waiting: users.filter((user) => !user.active).length,
+    online: users.filter(isUserOnline).length,
   }
 }
 
@@ -1171,21 +1176,21 @@ function scenarioStyle(strategy: StrategyName) {
         tone: 'blue' as const,
         short: 'Static reservation',
         icon: <Shield size={16} />,
-        expectation: 'Protects reserved UEs while others compete.',
+        expectation: 'Guarantees 30 UEs; later UEs compete.',
       }
     case 'dynamic_qos':
       return {
         tone: 'purple' as const,
         short: 'Temporary grants',
         icon: <Sparkles size={16} />,
-        expectation: 'Reuses priority so more UEs stay in good latency.',
+        expectation: 'Guarantees all planned UEs with temporary grants.',
       }
     default:
       return {
         tone: 'orange' as const,
         short: 'All public',
         icon: <Activity size={16} />,
-        expectation: 'Degrades quickly under shared contention.',
+        expectation: 'Guarantees 20 UEs, then all public traffic degrades.',
       }
   }
 }

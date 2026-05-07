@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 )
@@ -14,6 +15,22 @@ const (
 	demoPlannedUsers  = 50
 	demoInitialUsers  = 10
 	demoRampPerSecond = 5
+	demoUploadBytes   = 8 * 1024
+
+	demoNoOptimizationGuaranteedUsers = 20
+	demoStandardGBRGuaranteedUsers    = 30
+	demoDynamicQoSGuaranteedUsers     = demoPlannedUsers
+
+	demoNoOptimizationRatePerUEMbps = 0.25
+	demoStandardGBRRatePerUEMbps    = 12.0 / demoStandardGBRGuaranteedUsers
+	demoDynamicQoSRatePerUEMbps     = 0.318
+	demoStandardGBRPublicRateMbps   = 1.50
+	demoDynamicQoSPublicRateMbps    = 0.10
+	demoNoOptimizationRateMbps      = demoNoOptimizationRatePerUEMbps * demoNoOptimizationGuaranteedUsers
+	demoStandardGBRRateMbps         = demoStandardGBRRatePerUEMbps * demoStandardGBRGuaranteedUsers
+	demoDynamicQoSRateMbps          = demoDynamicQoSRatePerUEMbps * demoDynamicQoSGuaranteedUsers
+	demoTotalRateMbps               = demoDynamicQoSRateMbps + demoDynamicQoSPublicRateMbps
+
 	demoDynamicQoSWarmupGrace = 1500 * time.Millisecond
 )
 
@@ -37,7 +54,14 @@ const (
 )
 
 type DemoSessionRequest struct {
-	Strategy StrategyName `json:"strategy"`
+	Strategy  StrategyName           `json:"strategy"`
+	Bandwidth *DemoBandwidthOverride `json:"bandwidth,omitempty"`
+}
+
+type DemoBandwidthOverride struct {
+	TotalRateMbps     *float64 `json:"total_rate_mbps,omitempty"`
+	PublicRateMbps    *float64 `json:"public_rate_mbps,omitempty"`
+	OptimizedRateMbps *float64 `json:"optimized_rate_mbps,omitempty"`
 }
 
 type DemoCounters struct {
@@ -63,6 +87,7 @@ type DemoUser struct {
 	Index           int            `json:"index"`
 	Status          DemoUserStatus `json:"status"`
 	Treatment       DemoTreatment  `json:"treatment"`
+	Online          bool           `json:"online"`
 	Active          bool           `json:"active"`
 	Running         bool           `json:"running"`
 	Uploading       bool           `json:"uploading"`
@@ -139,6 +164,9 @@ func (m *ScenarioManager) handleDemoSession(w http.ResponseWriter, r *http.Reque
 	}
 
 	session := newDemoSession(req.Strategy)
+	if req.Bandwidth != nil {
+		applyDemoBandwidthOverride(&session.Config, *req.Bandwidth)
+	}
 	m.metrics.reset(session.Config)
 	m.demo = &session
 	m.demoLast = make(map[string]DemoClientResult)
@@ -314,13 +342,9 @@ func newDemoSession(strategy StrategyName) DemoSession {
 	cfg := defaultScenarioConfig()
 	cfg.Strategy = strategy
 	cfg.Clients = demoPlannedUsers
-	cfg.UploadBytes = 8 * 1024
-	cfg.TotalRateMbps = cfg.TotalRateMbps / 6
-	if strategy == StrategyDynamicQoS {
-		cfg.TotalRateMbps = cfg.TotalRateMbps * 3
-	}
-	cfg.Public.RateMbps = cfg.TotalRateMbps * 0.05
-	cfg.Optimized.RateMbps = cfg.TotalRateMbps - cfg.Public.RateMbps
+	cfg.UploadBytes = demoUploadBytes
+	cfg.DurationS = 0
+	applyDemoCapacity(&cfg, strategy)
 
 	users := make([]DemoUser, 0, demoPlannedUsers)
 	for i := 1; i <= demoPlannedUsers; i++ {
@@ -340,6 +364,34 @@ func newDemoSession(strategy StrategyName) DemoSession {
 		RampPerSecond: demoRampPerSecond,
 		Config:        cfg,
 		Users:         users,
+	}
+}
+
+func applyDemoCapacity(cfg *ScenarioConfig, strategy StrategyName) {
+	cfg.TotalRateMbps = demoTotalRateMbps
+
+	switch strategy {
+	case StrategyStandardGBR:
+		cfg.Public.RateMbps = demoStandardGBRPublicRateMbps
+		cfg.Optimized.RateMbps = demoStandardGBRRateMbps
+	case StrategyDynamicQoS:
+		cfg.Public.RateMbps = demoDynamicQoSPublicRateMbps
+		cfg.Optimized.RateMbps = demoDynamicQoSRateMbps
+	default:
+		cfg.Public.RateMbps = demoNoOptimizationRateMbps
+		cfg.Optimized.RateMbps = cfg.TotalRateMbps - cfg.Public.RateMbps
+	}
+}
+
+func applyDemoBandwidthOverride(cfg *ScenarioConfig, override DemoBandwidthOverride) {
+	if override.TotalRateMbps != nil && *override.TotalRateMbps > 0 {
+		cfg.TotalRateMbps = *override.TotalRateMbps
+	}
+	if override.PublicRateMbps != nil && *override.PublicRateMbps >= 0 {
+		cfg.Public.RateMbps = *override.PublicRateMbps
+	}
+	if override.OptimizedRateMbps != nil && *override.OptimizedRateMbps >= 0 {
+		cfg.Optimized.RateMbps = *override.OptimizedRateMbps
 	}
 }
 
@@ -388,12 +440,19 @@ func (m *ScenarioManager) startDemoRampLocked() {
 					return
 				}
 				activated, err := m.activateDemoUsersLocked(m.demo.RampPerSecond)
-				if err != nil || activated == 0 {
+				if activated > 0 {
+					m.broadcastDemoSnapshotLocked()
+				}
+				if err != nil {
+					log.Printf("demo ramp activation failed, will retry: %v", err)
+					m.mu.Unlock()
+					continue
+				}
+				if activated == 0 {
 					m.stopDemoRampLocked()
 					m.mu.Unlock()
 					return
 				}
-				m.broadcastDemoSnapshotLocked()
 				m.mu.Unlock()
 			}
 		}
@@ -453,6 +512,7 @@ func (m *ScenarioManager) demoStateLocked() DemoStateResponse {
 		clientReports[client.ClientID] = client
 	}
 
+	sessionOnline := m.server != nil
 	for _, user := range m.demo.Users {
 		if user.ActivatedAt != nil {
 			user.Active = true
@@ -493,6 +553,7 @@ func (m *ScenarioManager) demoStateLocked() DemoStateResponse {
 				user.Status = DemoUserStatusIdle
 			}
 		}
+		user.Online = sessionOnline || user.Active
 
 		state.Users = append(state.Users, user)
 		switch user.Status {

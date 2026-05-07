@@ -18,14 +18,17 @@ func TestNewDemoSession(t *testing.T) {
 	if len(session.Users) != demoPlannedUsers {
 		t.Fatalf("len(users) = %d, want %d", len(session.Users), demoPlannedUsers)
 	}
-	if session.Config.UploadBytes != 8*1024 {
-		t.Fatalf("upload_bytes = %d, want %d", session.Config.UploadBytes, 8*1024)
+	if session.Config.UploadBytes != demoUploadBytes {
+		t.Fatalf("upload_bytes = %d, want %d", session.Config.UploadBytes, demoUploadBytes)
 	}
-	if session.Config.TotalRateMbps != defaultScenarioConfig().TotalRateMbps/6 {
-		t.Fatalf("total rate = %v, want one sixth default", session.Config.TotalRateMbps)
+	if !nearRate(session.Config.TotalRateMbps, demoTotalRateMbps) {
+		t.Fatalf("total rate = %v, want %v", session.Config.TotalRateMbps, demoTotalRateMbps)
 	}
-	if got := session.Config.Public.RateMbps + session.Config.Optimized.RateMbps; math.Abs(got-session.Config.TotalRateMbps) > 0.0001 {
-		t.Fatalf("profile rates sum = %v, want total %v", got, session.Config.TotalRateMbps)
+	if !nearRate(session.Config.Public.RateMbps, demoStandardGBRPublicRateMbps) {
+		t.Fatalf("public rate = %v, want %v", session.Config.Public.RateMbps, demoStandardGBRPublicRateMbps)
+	}
+	if !nearRate(session.Config.Optimized.RateMbps, demoStandardGBRRateMbps) {
+		t.Fatalf("optimized rate = %v, want %v", session.Config.Optimized.RateMbps, demoStandardGBRRateMbps)
 	}
 	if session.Users[0].Treatment != DemoTreatmentReserved {
 		t.Fatalf("first user treatment = %q, want reserved", session.Users[0].Treatment)
@@ -35,17 +38,83 @@ func TestNewDemoSession(t *testing.T) {
 	}
 }
 
-func TestNewDemoSessionDynamicQoSRaisesOptimizedBudget(t *testing.T) {
-	session := newDemoSession(StrategyDynamicQoS)
-	if session.Config.TotalRateMbps != defaultScenarioConfig().TotalRateMbps/2 {
-		t.Fatalf("dynamic total rate = %v, want half default", session.Config.TotalRateMbps)
+func TestNewDemoSessionUsesStrategyGuaranteeSlices(t *testing.T) {
+	cases := []struct {
+		name          string
+		strategy      StrategyName
+		publicRate    float64
+		optimizedRate float64
+	}{
+		{
+			name:          "no optimization",
+			strategy:      StrategyNoOptimization,
+			publicRate:    demoNoOptimizationRateMbps,
+			optimizedRate: demoTotalRateMbps - demoNoOptimizationRateMbps,
+		},
+		{
+			name:          "standard gbr",
+			strategy:      StrategyStandardGBR,
+			publicRate:    demoStandardGBRPublicRateMbps,
+			optimizedRate: demoStandardGBRRateMbps,
+		},
+		{
+			name:          "dynamic qos",
+			strategy:      StrategyDynamicQoS,
+			publicRate:    demoDynamicQoSPublicRateMbps,
+			optimizedRate: demoDynamicQoSRateMbps,
+		},
 	}
-	if session.Config.Optimized.RateMbps <= newDemoSession(StrategyStandardGBR).Config.Optimized.RateMbps {
-		t.Fatalf("dynamic optimized rate = %v, want greater than standard demo rate", session.Config.Optimized.RateMbps)
+
+	for _, tc := range cases {
+		session := newDemoSession(tc.strategy)
+		if !nearRate(session.Config.TotalRateMbps, demoTotalRateMbps) {
+			t.Fatalf("%s total rate = %v, want %v", tc.name, session.Config.TotalRateMbps, demoTotalRateMbps)
+		}
+		if !nearRate(session.Config.Public.RateMbps, tc.publicRate) {
+			t.Fatalf("%s public rate = %v, want %v", tc.name, session.Config.Public.RateMbps, tc.publicRate)
+		}
+		if !nearRate(session.Config.Optimized.RateMbps, tc.optimizedRate) {
+			t.Fatalf("%s optimized rate = %v, want %v", tc.name, session.Config.Optimized.RateMbps, tc.optimizedRate)
+		}
 	}
-	if session.Config.Optimized.RateMbps <= 16 {
-		t.Fatalf("dynamic optimized rate = %v, want safely above the no-failure threshold", session.Config.Optimized.RateMbps)
+}
+
+func TestDemoSessionRequestOverridesBandwidth(t *testing.T) {
+	mgr := newScenarioManager("/tmp/mock-ue")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/demo/session", strings.NewReader(`{
+		"strategy":"standard_gbr",
+		"bandwidth":{
+			"total_rate_mbps":21,
+			"public_rate_mbps":0.25,
+			"optimized_rate_mbps":12.5
+		}
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mgr.handleDemoSession(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("session status = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
+
+	var state DemoStateResponse
+	if err := json.NewDecoder(rec.Body).Decode(&state); err != nil {
+		t.Fatalf("decode session response: %v", err)
+	}
+	if !nearRate(state.Bandwidth.TotalRateMbps, 21) {
+		t.Fatalf("total rate = %v, want 21", state.Bandwidth.TotalRateMbps)
+	}
+	if !nearRate(state.Bandwidth.PublicRateMbps, 0.25) {
+		t.Fatalf("public rate = %v, want 0.25", state.Bandwidth.PublicRateMbps)
+	}
+	if !nearRate(state.Bandwidth.OptimizedRateMbps, 12.5) {
+		t.Fatalf("optimized rate = %v, want 12.5", state.Bandwidth.OptimizedRateMbps)
+	}
+}
+
+func nearRate(got, want float64) bool {
+	return math.Abs(got-want) < 0.0001
 }
 
 func TestHandleDemoSessionAndState(t *testing.T) {
@@ -87,6 +156,9 @@ func TestHandleDemoSessionAndState(t *testing.T) {
 	}
 	if stateResp.Users[0].Status != DemoUserStatusPlanned {
 		t.Fatalf("user status = %q, want planned", stateResp.Users[0].Status)
+	}
+	if stateResp.Users[0].Online {
+		t.Fatalf("user online = true, want false before run start")
 	}
 }
 
@@ -140,6 +212,26 @@ func TestDemoStateCountsActivatedUsers(t *testing.T) {
 	}
 	if state.Counters.IdleUsers != 1 {
 		t.Fatalf("idle users = %d, want 1", state.Counters.IdleUsers)
+	}
+}
+
+func TestDemoStateMarksAllUsersOnlineDuringRun(t *testing.T) {
+	mgr := newScenarioManager("/tmp/mock-ue")
+	session := newDemoSession(StrategyStandardGBR)
+	mgr.demo = &session
+	mgr.server = &childProcess{name: "server"}
+
+	state := mgr.demoStateLocked()
+	if state.Counters.ActiveUsers != 0 {
+		t.Fatalf("active users = %d, want 0 before traffic ramp", state.Counters.ActiveUsers)
+	}
+	for _, user := range state.Users {
+		if !user.Online {
+			t.Fatalf("user %s online = false, want true during run", user.ClientID)
+		}
+		if user.Active {
+			t.Fatalf("user %s active = true, want false before traffic ramp", user.ClientID)
+		}
 	}
 }
 
@@ -220,8 +312,9 @@ func TestClassifyDemoUserStatus(t *testing.T) {
 		want      DemoUserStatus
 	}{
 		{latencyMS: 75, want: DemoUserStatusGood},
-		{latencyMS: 150, want: DemoUserStatusDelayed},
-		{latencyMS: 250, want: DemoUserStatusFailed},
+		{latencyMS: 150, want: DemoUserStatusGood},
+		{latencyMS: 250, want: DemoUserStatusDelayed},
+		{latencyMS: 310, want: DemoUserStatusFailed},
 	}
 	for _, tc := range cases {
 		if got := classifyDemoUserStatus(tc.latencyMS); got != tc.want {

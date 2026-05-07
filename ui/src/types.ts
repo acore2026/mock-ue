@@ -45,6 +45,7 @@ export interface DemoUser {
   index: number
   status: DemoUserStatus
   treatment: DemoTreatment
+  online?: boolean
   active: boolean
   running: boolean
   uploading?: boolean

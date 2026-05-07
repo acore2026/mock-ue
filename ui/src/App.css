@@ -683,18 +683,18 @@
   box-shadow: inset 3px 0 0 rgba(124, 58, 237, 0.66), inset 0 0 0 1px rgba(124, 58, 237, 0.2);
 }
 
-.ue-card.treatment-temporary_grant {
-  border-color: #fdba74;
-  box-shadow: inset 3px 0 0 rgba(245, 158, 11, 0.7), inset 0 0 0 1px rgba(245, 158, 11, 0.18);
-}
-
-.ue-card.status-failed.treatment-reserved,
-.ue-card.status-failed.treatment-temporary_grant {
+.ue-card.status-failed.treatment-reserved {
   border-color: #f87171;
   box-shadow: inset 3px 0 0 rgba(239, 68, 68, 0.72), inset 0 0 0 1px rgba(239, 68, 68, 0.18);
 }
 
-.ue-card.is-waiting {
+.ue-card.is-online-idle {
+  border-color: #b9d5ff;
+  background: #fbfdff;
+  box-shadow: inset 3px 0 0 rgba(37, 99, 235, 0.34);
+}
+
+.ue-card.is-offline {
   border-color: var(--line);
   background: #f8fafc;
   box-shadow: inset 3px 0 0 rgba(148, 163, 184, 0.44);
@@ -723,16 +723,20 @@
   color: var(--purple);
 }
 
-.ue-card.treatment-temporary_grant .ue-phone-icon {
-  color: var(--orange);
-}
-
 .ue-card.status-failed .ue-phone-icon {
   color: var(--red);
 }
 
-.ue-card.is-waiting .ue-phone-icon {
+.ue-card.is-online-idle .ue-phone-icon {
+  color: var(--blue);
+}
+
+.ue-card.is-offline .ue-phone-icon {
   color: #94a3b8;
+}
+
+.ue-card.is-online-idle .ue-status-dot {
+  background: var(--blue);
 }
 
 .ue-card-name {
@@ -808,12 +812,7 @@
   background: var(--purple-soft);
 }
 
-.ue-treatment-badge.treatment-temporary_grant {
-  color: var(--orange);
-  background: var(--orange-soft);
-}
-
-.ue-card.is-waiting .ue-treatment-badge {
+.ue-card.is-offline .ue-treatment-badge {
   color: #94a3b8;
   background: #eef2f7;
 }
@@ -914,16 +913,11 @@
   background: var(--purple);
 }
 
-.ue-card.treatment-temporary_grant .spark-bars span {
-  background: var(--orange);
-}
-
-.ue-card.status-failed.treatment-reserved .spark-bars span,
-.ue-card.status-failed.treatment-temporary_grant .spark-bars span {
+.ue-card.status-failed.treatment-reserved .spark-bars span {
   background: var(--red);
 }
 
-.ue-card.is-waiting .spark-bars span {
+.ue-card.is-offline .spark-bars span {
   background: #cbd5e1;
 }
 

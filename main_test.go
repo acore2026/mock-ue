@@ -121,7 +121,7 @@ func TestSleepUntilDoesNotCatchUpWhenBehind(t *testing.T) {
 	start := time.Now().Add(-2 * time.Second)
 	deadline := time.Now().Add(1500 * time.Millisecond)
 	before := time.Now()
-	if !sleepUntil(deadline, time.Second, start) {
+	if !sleepUntil(deadline, true, time.Second, start) {
 		t.Fatalf("sleepUntil returned false, want true")
 	}
 	if elapsed := time.Since(before); elapsed < 900*time.Millisecond {
@@ -149,10 +149,10 @@ func TestClassifyLatency(t *testing.T) {
 		latency float64
 		want    string
 	}{
-		{latency: 99.9, want: outcomeGood},
-		{latency: 100, want: outcomeDelayed},
-		{latency: 200, want: outcomeDelayed},
-		{latency: 200.1, want: outcomeFailed},
+		{latency: 150, want: outcomeGood},
+		{latency: 150.1, want: outcomeDelayed},
+		{latency: 300, want: outcomeDelayed},
+		{latency: 300.1, want: outcomeFailed},
 	}
 	for _, tc := range cases {
 		if got := classifyLatency(tc.latency); got != tc.want {
@@ -206,7 +206,7 @@ func TestMetricsReportOutcomes(t *testing.T) {
 	if report.ProtectedClients != 1 {
 		t.Fatalf("protected clients = %d, want 1", report.ProtectedClients)
 	}
-	if report.Outcomes.Attempts != 4 || report.Outcomes.Good != 1 || report.Outcomes.Delayed != 1 || report.Outcomes.Failed != 2 {
+	if report.Outcomes.Attempts != 4 || report.Outcomes.Good != 2 || report.Outcomes.Delayed != 1 || report.Outcomes.Failed != 1 {
 		t.Fatalf("unexpected aggregate outcomes: %+v", report.Outcomes)
 	}
 	if report.Aggregate.Errors != 1 {

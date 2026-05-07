@@ -391,9 +391,9 @@ const (
 
 func classifyLatency(latencyMS float64) string {
 	switch {
-	case latencyMS < 100:
+	case latencyMS <= 150:
 		return outcomeGood
-	case latencyMS <= 200:
+	case latencyMS <= 300:
 		return outcomeDelayed
 	default:
 		return outcomeFailed
