@@ -5,7 +5,6 @@ import {
   Activity,
   AlertTriangle,
   CircleDot,
-  Smartphone,
   Play,
   Radio,
   RefreshCcw,
@@ -784,20 +783,24 @@ const DeviceBoard = memo(function DeviceBoard({
 }) {
   const [filter, setFilter] = useState<BoardFilter>('all')
   const [sortMode, setSortMode] = useState<BoardSort>('ue')
-  const deferredUsers = useDeferredValue(state?.users ?? [])
+  const users = useMemo(() => state?.users ?? [], [state])
   const deferredResultByID = useDeferredValue(resultByID)
   const deferredLatencyHistoryByID = useDeferredValue(latencyHistoryByID)
-  const filterCounts = useMemo(() => boardFilterCounts(deferredUsers), [deferredUsers])
+  const onlineCount = state?.users.filter(isUserOnline).length ?? 0
+  const uploadingCount = users.filter((user) => user.active && (user.uploading || user.running)).length
+  const scenario3Hero = heroUserForScenario3(state, deferredResultByID)
+  const filterCounts = useMemo(() => boardFilterCounts(users), [users])
   const visibleUsers = useMemo(
-    () => sortUsers(filterUsers(deferredUsers, filter), sortMode, deferredResultByID),
-    [deferredUsers, deferredResultByID, filter, sortMode],
+    () => sortUsers(filterUsers(users, filter), sortMode, deferredResultByID),
+    [users, deferredResultByID, filter, sortMode],
   )
 
   return (
     <section className="panel activity-board">
       <div className="panel-title-row">
-        <div>
-          <h2>UE Activity Board</h2>
+        <div className="ai-monitor-title">
+          <h2>AI Upload UE Monitor</h2>
+          <span>{onlineCount} online · {uploadingCount} uploading · target AI response &lt;100 ms</span>
         </div>
         <div className="sort-control">
           <span>Sort By</span>
@@ -819,6 +822,12 @@ const DeviceBoard = memo(function DeviceBoard({
           </button>
         ))}
       </div>
+
+      <Scenario3HeroCard
+        state={state}
+        hero={scenario3Hero}
+        latestResult={scenario3Hero ? deferredResultByID[scenario3Hero.client_id] : undefined}
+      />
 
       {state ? (
         visibleUsers.length ? (
@@ -860,16 +869,22 @@ const DeviceCard = memo(function DeviceCard({
   const online = isUserOnline(user)
   const displayStatus = latestResult ? classifyResultStatus(latestResult) : online && user.status === 'planned' ? 'idle' : user.status
   const displayLatencyMS = latestResult?.latency_ms ?? user.last_latency_ms ?? 0
-  const treatment = treatmentMeta(user)
-  const treatmentClass = user.treatment === 'reserved' ? 'treatment-reserved' : 'treatment-public'
+  const badge = qosBadgeMeta(user)
+  const treatmentClass = user.treatment === 'reserved' || user.treatment === 'temporary_grant' ? 'treatment-reserved' : 'treatment-public'
   const uploadProgressActive = runActive && latestResult?.success === true
   const uploadProgressSeed = `${user.client_id}:${latestResult?.attempt ?? user.attempts}:${latestResult?.at ?? user.last_seen ?? ''}`
   const uploadProgressPhase = hashToUnit(`${uploadProgressSeed}:phase`)
   const uploadProgressDuration = 1
+  const label = ueShortLabel(user)
+  const outcome = aiOutcomeForStatus(displayStatus, user.uploading)
+  const latencyText = displayLatencyMS > 0 ? formatLatency(displayLatencyMS) : online ? 'Waiting' : '--'
+  const accessibleLabel = `${label}, ${outcome.label}, ${latencyText}, ${badge.label}`
 
   return (
     <motion.article
       className={`ue-card status-${displayStatus} ${treatmentClass} ${online && !user.active ? 'is-online-idle' : ''} ${online ? '' : 'is-offline'}`}
+      aria-label={accessibleLabel}
+      title={accessibleLabel}
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: 0.05 + (index % 12) * 0.015 }}
@@ -877,12 +892,11 @@ const DeviceCard = memo(function DeviceCard({
       <div className="ue-card-top">
         <div className="ue-card-id">
           <span className="ue-status-dot" />
-          <Smartphone className="ue-phone-icon" size={13} />
           <div className="ue-card-name">
-            <strong>{ueLabel(user)}</strong>
-            <span>{user.client_ip}</span>
+            <strong>{label}</strong>
           </div>
         </div>
+        <span className={`ue-treatment-badge treatment-${badge.tone}`}>{badge.short}</span>
       </div>
 
       <div className="ue-card-body">
@@ -897,7 +911,7 @@ const DeviceCard = memo(function DeviceCard({
             } as CSSProperties
           }
           role={uploadProgressActive ? 'progressbar' : undefined}
-          aria-label={uploadProgressActive ? `${ueLabel(user)} upload progress` : undefined}
+          aria-label={uploadProgressActive ? `${label} upload progress` : undefined}
           aria-valuetext={uploadProgressActive ? 'Cycling after successful upload' : undefined}
           aria-hidden={uploadProgressActive ? undefined : true}
         >
@@ -915,13 +929,7 @@ const DeviceCard = memo(function DeviceCard({
           <span className="dot-core" />
         </div>
         <div className="ue-card-metrics">
-          <strong>{displayLatencyMS > 0 ? formatLatency(displayLatencyMS) : online ? 'Online' : '--'}</strong>
-          {treatment ? (
-            <span className={`ue-treatment-badge treatment-${user.treatment}`} title={treatment.label}>
-              {treatment.icon}
-              <span>{treatment.short}</span>
-            </span>
-          ) : null}
+          <strong>{latencyText}</strong>
         </div>
       </div>
 
@@ -929,6 +937,109 @@ const DeviceCard = memo(function DeviceCard({
     </motion.article>
   )
 })
+
+function Scenario3HeroCard({
+  state,
+  hero,
+  latestResult,
+}: {
+  state: DemoState | null
+  hero: DemoUser | null
+  latestResult?: UploadResult
+}) {
+  if (!state) {
+    return null
+  }
+
+  if (state.strategy !== 'dynamic_qos') {
+    return (
+      <div className="scenario3-hero-empty">
+        <strong>Scenario 3 hero card is next for Dynamic QoS.</strong>
+        <span>Crowd UE tiles remain live for this mode.</span>
+      </div>
+    )
+  }
+
+  if (!hero) {
+    return (
+      <div className="scenario3-hero-empty">
+        <strong>No matching hero UE for this scenario yet.</strong>
+        <span>Start traffic or wait for the next AI upload result.</span>
+      </div>
+    )
+  }
+
+  const latency = latestResult?.latency_ms ?? hero.last_latency_ms ?? 0
+  const displayStatus = latestResult ? classifyResultStatus(latestResult) : hero.uploading ? 'running' : hero.status
+  const outcome = aiOutcomeForStatus(displayStatus, hero.uploading)
+  const beforeLatency = scenario3BeforeLatency(latency)
+  const improvement = latency > 0 ? Math.max(0, beforeLatency - latency) : 0
+  const grantActive = state.running && (hero.uploading || hero.treatment === 'temporary_grant')
+  const recognized = recognitionLabelForUser(hero)
+  const latencyText = latency > 0 ? formatLatency(latency) : 'Waiting'
+  const targetMet = latestResult?.success === true && latency > 0 && latency < 100
+
+  return (
+    <article className={`scenario3-hero-card outcome-${outcome.tone}`}>
+      <div className="scenario3-hero-main">
+        <header className="scenario3-hero-head">
+          <div>
+            <span className="scenario3-eyebrow">Intent-assisted QoS</span>
+            <h3>{ueShortLabel(hero)} · {deviceTypeForUser(hero)}</h3>
+            <p>AI image recognition uplink · 1 image/s · target &lt;100 ms</p>
+          </div>
+          <span className={`scenario3-status-pill tone-${outcome.tone}`}>
+            {grantActive ? 'Intent QoS active' : outcome.label}
+          </span>
+        </header>
+
+        <div className="scenario3-latency-block">
+          <span>AI response latency</span>
+          <strong>{latencyText}</strong>
+          <em>{outcome.label}</em>
+        </div>
+
+        <div className="scenario3-flow" aria-label="Intent to result workflow">
+          <span>Intent reported</span>
+          <i />
+          <span>QoS grant</span>
+          <i />
+          <span>AI upload</span>
+          <i />
+          <span>{targetMet ? 'On-time result' : 'Result window'}</span>
+        </div>
+      </div>
+
+      <div className="scenario3-hero-details">
+        <dl>
+          <div>
+            <dt>Before intent report</dt>
+            <dd>{formatLatency(beforeLatency)} · Missed target</dd>
+          </div>
+          <div>
+            <dt>During temporary grant</dt>
+            <dd>{latencyText} · {targetMet ? 'On time' : outcome.label}</dd>
+          </div>
+          <div>
+            <dt>Latency improvement</dt>
+            <dd>{improvement > 0 ? `-${formatLatency(improvement)}` : '--'}</dd>
+          </div>
+          <div>
+            <dt>Temporary QoS grant</dt>
+            <dd>Low-latency flow · 2 Mbps GBR · PDB 100 ms</dd>
+          </div>
+          <div>
+            <dt>Last AI result</dt>
+            <dd>{latestResult?.success ? `${recognized} recognized · success` : 'Waiting for successful result'}</dd>
+          </div>
+        </dl>
+        <aside>
+          The UE reports an upcoming AI image upload before the burst starts. The network applies an elevated QoS grant only for this short service window.
+        </aside>
+      </div>
+    </article>
+  )
+}
 
 function Panel({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -1160,18 +1271,78 @@ function labelForSort(sortMode: BoardSort) {
   }
 }
 
-function ueLabel(user: DemoUser) {
-  return `imsi-20893-${String(user.index).padStart(3, '0')}`
+function ueShortLabel(user: DemoUser) {
+  return `UE-${String(user.index).padStart(3, '0')}`
 }
 
-function treatmentMeta(user: DemoUser): { short: string; label: string; icon: ReactNode } | null {
+function deviceTypeForUser(user: DemoUser) {
+  const devices = ['Robot Vision Unit', 'Drone Camera', 'AR Inspection Glasses', 'Fixed AI Camera']
+  return devices[(user.index - 1) % devices.length]
+}
+
+function recognitionLabelForUser(user: DemoUser) {
+  const labels = ['pallet', 'safety vest', 'barcode', 'tool case', 'package']
+  return labels[(user.index - 1) % labels.length]
+}
+
+function qosBadgeMeta(user: DemoUser) {
   if (!isUserOnline(user)) {
+    return { short: 'Wait', label: 'Waiting', tone: 'waiting' }
+  }
+  switch (user.treatment) {
+    case 'reserved':
+      return { short: 'GBR', label: 'GBR QoS flow', tone: 'reserved' }
+    case 'temporary_grant':
+      return { short: 'Temp', label: 'Temporary QoS grant', tone: 'temporary' }
+    default:
+      return { short: 'Non-GBR', label: 'Non-GBR QoS flow', tone: 'public' }
+  }
+}
+
+function aiOutcomeForStatus(status: DemoUserStatus, uploading?: boolean) {
+  if (uploading && status === 'running') {
+    return { label: 'Uploading', tone: 'running' }
+  }
+  switch (status) {
+    case 'good':
+      return { label: 'Healthy', tone: 'healthy' }
+    case 'delayed':
+      return { label: 'Degraded', tone: 'degraded' }
+    case 'high':
+      return { label: 'Critical', tone: 'critical' }
+    case 'failed':
+      return { label: 'Failed', tone: 'failed' }
+    case 'running':
+      return { label: 'Uploading', tone: 'running' }
+    case 'idle':
+    case 'planned':
+    default:
+      return { label: 'Waiting', tone: 'waiting' }
+  }
+}
+
+function heroUserForScenario3(state: DemoState | null, resultByID: Record<string, UploadResult>) {
+  if (!state || state.strategy !== 'dynamic_qos') {
     return null
   }
-  if (user.treatment === 'reserved') {
-    return { short: 'GBR', label: 'Reserved GBR', icon: <Shield size={10} /> }
+  const activeUsers = state.users.filter((user) => user.active)
+  return (
+    activeUsers.find((user) => {
+      const result = resultByID[user.client_id]
+      return result?.success === true && result.latency_ms > 0 && result.latency_ms < 100
+    }) ??
+    activeUsers.find((user) => resultByID[user.client_id]?.success === true) ??
+    activeUsers.find((user) => user.uploading) ??
+    activeUsers.find((user) => user.running) ??
+    null
+  )
+}
+
+function scenario3BeforeLatency(latencyMS: number) {
+  if (latencyMS <= 0) {
+    return 172
   }
-  return null
+  return Math.min(280, Math.max(145, latencyMS + 111))
 }
 
 function formatMbps(value: number) {
