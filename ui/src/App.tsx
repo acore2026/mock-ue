@@ -25,15 +25,9 @@ import {
 import {
   Area,
   AreaChart,
-  CartesianGrid,
   Cell,
-  ComposedChart,
-  Line,
   Pie,
   PieChart,
-  ReferenceArea,
-  ReferenceLine,
-  ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
@@ -63,11 +57,25 @@ type HistoryPoint = {
   goodPct: number
   degradedPct: number
   highPct: number
+  failedPct: number
+  goodCount: number
+  degradedCount: number
+  highCount: number
+  failedCount: number
   prioritized: number
   temporary: number
   capacity: number
   latencies: number[]
 }
+type OutcomeHistoryPoint = Pick<HistoryPoint, 'active' | 'goodPct' | 'degradedPct' | 'highPct' | 'failedPct'>
+type BoxPlotStats = {
+  min: number
+  q1: number
+  median: number
+  q3: number
+  max: number
+}
+type BoxPlotPoint = HistoryPoint & { box: BoxPlotStats }
 
 const initialPendingState: PendingActions = {
   mode: false,
@@ -131,6 +139,7 @@ function useDemoLiveState() {
   const [latencyHistoryByID, setLatencyHistoryByID] = useState<Record<string, number[]>>({})
   const [historyPoints, setHistoryPoints] = useState<HistoryPoint[]>([])
   const recordedAttemptsRef = useRef<Record<string, number>>({})
+  const stateRef = useRef<DemoState | null>(null)
 
   function setActionPending(action: PendingAction, value: boolean) {
     setPending((current) => {
@@ -150,15 +159,17 @@ function useDemoLiveState() {
 
   function applyState(nextState: DemoState | null) {
     if (!nextState) {
+      stateRef.current = null
       setState(null)
       resetSandboxState()
       return
     }
 
+    stateRef.current = nextState
     setState(nextState)
 
-    if (nextState.running || nextState.counters.active_users > 0) {
-      setHistoryPoints((current) => [...current, makeHistoryPoint(nextState, current.length)].slice(-90))
+    if (nextState.running || nextState.counters.active_users > 0 || nextState.users.length > 0) {
+      setHistoryPoints((current) => appendHistoryPoint(current, makeHistoryPoint(nextState, current.length)))
     }
 
     if (!nextState.running && nextState.counters.active_users === 0) {
@@ -272,6 +283,14 @@ function useDemoLiveState() {
           }
           return next
         })
+
+        const currentState = stateRef.current
+        if (currentState) {
+          setHistoryPoints((current) => {
+            const point = makeHistoryPointFromResults(currentState, items, current.length)
+            return point ? appendHistoryPoint(current, point) : current
+          })
+        }
       })
     }
 
@@ -406,6 +425,7 @@ function StrategyComparison({
   const activeStrategy = state?.strategy ?? null
   const activeUsers = state?.counters.active_users ?? 0
   const latestPoint = historyPoints.at(-1)
+  const outcomeHistoryPoints = compactOutcomeHistory(historyPoints)
 
   return (
     <section className="strategy-comparison" aria-label="Mode selection" role="radiogroup">
@@ -417,6 +437,7 @@ function StrategyComparison({
         const comparison = strategyComparisonMetrics(strategy.value, {
           isActive: isApplied,
           latestPoint,
+          outcomeHistoryPoints,
           state,
           activeUsers,
         })
@@ -439,11 +460,12 @@ function StrategyComparison({
             </div>
 
             <div className="comparison-body">
-              <StrategyMiniTrend tone={scenario.tone} points={comparison.trend} />
+              <StrategyOutcomeMiniChart tone={scenario.tone} points={comparison.outcomeHistory} />
 
               <div className="comparison-metrics">
-                <MetricInline label="Good" value={comparison.good} tone="green" />
+                <MetricInline label="Healthy" value={comparison.good} tone="green" />
                 <MetricInline label="P50 Latency" value={comparison.p50} tone="purple" />
+                <MetricInline label="Critical" value={comparison.critical} tone="critical" />
                 <MetricInline label="Failed" value={comparison.failed} tone="red" />
               </div>
             </div>
@@ -459,22 +481,25 @@ function StrategyComparison({
   )
 }
 
-function StrategyMiniTrend({
+function StrategyOutcomeMiniChart({
   tone,
   points,
 }: {
   tone: 'blue' | 'orange' | 'purple'
-  points: number[]
+  points: OutcomeHistoryPoint[]
 }) {
-  const pathA = sparkPath(points)
-  const pathB = sparkPath(points.map((value, index) => Math.max(0, value - 10 - index * 1.5)))
+  const chartPoints = prepareOutcomeChartPoints(points)
+  const maxActive = Math.max(...chartPoints.map((point) => point.active), 1)
 
   return (
-    <svg className={`strategy-mini-trend tone-${tone}`} viewBox="0 0 180 38" preserveAspectRatio="none" aria-hidden="true">
-      <path className="trend-fill" d={`${pathA} L 180 38 L 0 38 Z`} />
-      <path className="trend-line-primary" d={pathA} />
-      <path className="trend-line-secondary" d={pathB} />
-    </svg>
+    <div className={`strategy-outcome-mini tone-${tone}`} aria-hidden="true">
+      <svg viewBox="0 0 180 42" preserveAspectRatio="none" focusable="false">
+        <path d={outcomeBandPath(chartPoints, maxActive, 0, (point) => point.goodPct)} fill="#86d993" />
+        <path d={outcomeBandPath(chartPoints, maxActive, (point) => point.goodPct, (point) => point.goodPct + point.degradedPct)} fill="#fbd38d" />
+        <path d={outcomeBandPath(chartPoints, maxActive, (point) => point.goodPct + point.degradedPct, (point) => point.goodPct + point.degradedPct + point.highPct)} fill="#fdba74" />
+        <path d={outcomeBandPath(chartPoints, maxActive, (point) => point.goodPct + point.degradedPct + point.highPct, (point) => point.goodPct + point.degradedPct + point.highPct + point.failedPct)} fill="#dc2626" />
+      </svg>
+    </div>
   )
 }
 
@@ -492,6 +517,7 @@ function strategyComparisonMetrics(
   context: {
     isActive: boolean
     latestPoint?: HistoryPoint
+    outcomeHistoryPoints: OutcomeHistoryPoint[]
     state: DemoState | null
     activeUsers: number
   },
@@ -501,15 +527,17 @@ function strategyComparisonMetrics(
     return {
       good: `${goodLatencyPercent(context.state)}%`,
       p50: context.latestPoint ? formatLatency(context.latestPoint.p50) : '--',
+      critical: `${criticalPercent(context.state)}%`,
       failed: `${failedPercent(context.state)}%`,
-      trend: context.latestPoint?.latencies.length ? normalizeTrend(context.latestPoint.latencies) : guide.trend,
+      outcomeHistory: context.outcomeHistoryPoints.length ? context.outcomeHistoryPoints : guide.outcomeHistory,
     }
   }
   return {
     good: `${guide.good}%`,
     p50: `${guide.p50} ms`,
+    critical: `${guide.critical}%`,
     failed: `${guide.failed}%`,
-    trend: guide.trend,
+    outcomeHistory: guide.outcomeHistory,
   }
 }
 
@@ -517,26 +545,109 @@ function strategyGuide(strategy: StrategyName) {
   switch (strategy) {
     case 'standard_gbr':
       return {
-        good: 74,
-        p50: 70,
-        failed: 14,
-        trend: [38, 43, 48, 53, 57, 60, 64, 90, 150, 220, 310, 410],
+        good: 60,
+        p50: 145,
+        critical: 25,
+        failed: 0,
+        outcomeHistory: outcomeGuide([
+          [0, 100, 0, 0, 0],
+          [5, 100, 0, 0, 0],
+          [10, 100, 0, 0, 0],
+          [15, 100, 0, 0, 0],
+          [20, 100, 0, 0, 0],
+          [25, 92, 8, 0, 0],
+          [30, 86, 14, 0, 0],
+          [35, 78, 16, 6, 0],
+          [40, 72, 16, 12, 0],
+          [45, 66, 16, 18, 0],
+          [50, 60, 15, 25, 0],
+        ]),
       }
     case 'dynamic_qos':
       return {
         good: 100,
         p50: 70,
+        critical: 0,
         failed: 0,
-        trend: [42, 43, 43, 44, 44, 45, 45, 45, 46, 46, 47, 47],
+        outcomeHistory: outcomeGuide([
+          [0, 100, 0, 0, 0],
+          [5, 100, 0, 0, 0],
+          [10, 100, 0, 0, 0],
+          [15, 100, 0, 0, 0],
+          [20, 100, 0, 0, 0],
+          [25, 100, 0, 0, 0],
+          [30, 100, 0, 0, 0],
+          [35, 100, 0, 0, 0],
+          [40, 100, 0, 0, 0],
+          [45, 100, 0, 0, 0],
+          [50, 100, 0, 0, 0],
+        ]),
       }
     default:
       return {
         good: 40,
         p50: 245,
-        failed: 40,
-        trend: [46, 51, 58, 66, 76, 91, 112, 138, 171, 212, 260, 310],
+        critical: 40,
+        failed: 0,
+        outcomeHistory: outcomeGuide([
+          [0, 100, 0, 0, 0],
+          [5, 100, 0, 0, 0],
+          [10, 100, 0, 0, 0],
+          [15, 88, 12, 0, 0],
+          [20, 70, 30, 0, 0],
+          [25, 58, 34, 8, 0],
+          [30, 46, 36, 18, 0],
+          [35, 38, 32, 30, 0],
+          [40, 32, 28, 40, 0],
+          [45, 28, 22, 50, 0],
+          [50, 24, 16, 60, 0],
+        ]),
       }
   }
+}
+
+function outcomeGuide(points: Array<[number, number, number, number, number]>): OutcomeHistoryPoint[] {
+  return points.map(([active, goodPct, degradedPct, highPct, failedPct]) => ({ active, goodPct, degradedPct, highPct, failedPct }))
+}
+
+function prepareOutcomeChartPoints(points: OutcomeHistoryPoint[]) {
+  const sorted = [...points].sort((left, right) => left.active - right.active)
+  if (sorted.length === 0) {
+    return outcomeGuide([
+      [0, 0, 0, 0, 0],
+      [1, 0, 0, 0, 0],
+    ])
+  }
+  if (sorted.length === 1) {
+    const only = sorted[0]
+    return only.active === 0 ? [only, { ...only, active: 1 }] : [{ ...only, active: 0 }, only]
+  }
+  return sorted
+}
+
+function outcomeBandPath(
+  points: OutcomeHistoryPoint[],
+  maxActive: number,
+  lowerValue: number | ((point: OutcomeHistoryPoint) => number),
+  upperValue: (point: OutcomeHistoryPoint) => number,
+) {
+  const top = 3
+  const bottom = 39
+  const height = bottom - top
+  const x = (point: OutcomeHistoryPoint) => ((point.active / maxActive) * 180).toFixed(2)
+  const y = (value: number) => (bottom - (clampPercent(value) / 100) * height).toFixed(2)
+  const lower = (point: OutcomeHistoryPoint) => (typeof lowerValue === 'number' ? lowerValue : lowerValue(point))
+  const upperPoints = points.map((point) => `${x(point)} ${y(upperValue(point))}`)
+  const lowerPoints = [...points].reverse().map((point) => `${x(point)} ${y(lower(point))}`)
+
+  return `M ${upperPoints.join(' L ')} L ${lowerPoints.join(' L ')} Z`
+}
+
+function clampPercent(value: number) {
+  if (!Number.isFinite(value)) {
+    return 0
+  }
+  return Math.max(0, Math.min(100, value))
 }
 
 function AnalyticsColumn({
@@ -548,55 +659,44 @@ function AnalyticsColumn({
 }) {
   const good = state?.counters.good_users ?? 0
   const delayed = state?.counters.delayed_users ?? 0
+  const high = state?.counters.high_users ?? 0
   const failed = state?.counters.failed_users ?? 0
   const treatments = state ? treatmentCounts(state.users) : { public: 0, reserved: 0, temporary: 0 }
   const activeUsers = state?.counters.active_users ?? 0
   const outcomeData = [
-    { name: 'Good', value: good, color: '#22a34a' },
-    { name: 'Delayed', value: delayed, color: '#f59e0b' },
-    { name: 'High', value: failed, color: '#ef4444' },
+    { name: 'Healthy', value: good, color: '#22a34a' },
+    { name: 'Degraded', value: delayed, color: '#f59e0b' },
+    { name: 'Critical', value: high, color: '#f97316' },
+    { name: 'Failed', value: failed, color: '#dc2626' },
   ]
   const treatmentTotal = treatments.public + treatments.temporary + treatments.reserved
   const treatmentPct = (value: number) => (treatmentTotal > 0 ? Math.round((value / treatmentTotal) * 100) : 0)
-  const chartMaxUsers = Math.max(state?.counters.planned_users ?? 0, ...historyPoints.map((point) => point.active), 1)
-  const congestionPoint = historyPoints.find((point) => point.degradedPct + point.highPct > 0)?.tick ?? null
+  const chartPoints = compactHistoryByActive(historyPoints)
+  const chartMaxUsers = Math.max(state?.users.length ?? 0, ...chartPoints.map((point) => point.active), 1)
 
   return (
     <section className="analytics-column" aria-label="Simulation analytics">
-      <Panel title="Load & Latency Trend">
+      <Panel title="Latency Distribution">
         <div className="chart-shell trend-shell">
           <div className="chart-legend">
-            <span className="legend-item blue">Active UEs</span>
-            <span className="legend-item purple">P50 latency</span>
+            <span className="legend-item box">P25-P75</span>
+            <span className="legend-item purple">Median</span>
+            <span className="legend-item red">Failed</span>
           </div>
           <div className="empty-chart">
             <div className="line-chart-wrap">
-              {historyPoints.length ? (
-                <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
-                  <ComposedChart data={historyPoints} margin={{ top: 8, right: 10, bottom: 4, left: -18 }}>
-                    <CartesianGrid stroke="#e5edf7" strokeDasharray="3 3" vertical={false} />
-                    <XAxis dataKey="tick" tickFormatter={formatTickLabel} tick={{ fontSize: 10, fill: '#667085' }} tickLine={false} axisLine={false} allowDecimals={false} />
-                    <YAxis yAxisId="users" dataKey="active" type="number" domain={[0, chartMaxUsers]} tick={{ fontSize: 10, fill: '#667085' }} tickLine={false} axisLine={false} allowDecimals={false} />
-                    <YAxis yAxisId="latency" orientation="right" type="number" domain={[0, 320]} ticks={[0, 150, 300]} tickFormatter={formatLatencyAxis} tick={{ fontSize: 10, fill: '#667085' }} tickLine={false} axisLine={false} />
-                    <Tooltip contentStyle={{ border: '1px solid #dce3ef', borderRadius: 8, fontSize: 12 }} formatter={formatTrendTooltip} labelFormatter={(value) => formatTickLabel(Number(value))} />
-                    <ReferenceArea yAxisId="latency" y1={0} y2={150} fill="#22a34a" fillOpacity={0.08} />
-                    <ReferenceArea yAxisId="latency" y1={150} y2={300} fill="#f59e0b" fillOpacity={0.1} />
-                    <ReferenceArea yAxisId="latency" y1={300} y2={320} fill="#ef4444" fillOpacity={0.08} />
-                    <ReferenceLine yAxisId="latency" y={150} stroke="#22a34a" strokeDasharray="4 4" strokeOpacity={0.5} />
-                    <ReferenceLine yAxisId="latency" y={300} stroke="#ef4444" strokeDasharray="4 4" strokeOpacity={0.45} />
-                    {congestionPoint ? <ReferenceLine x={congestionPoint} stroke="#0f172a" strokeDasharray="3 5" strokeOpacity={0.45} label={{ value: 'Contention', position: 'insideTop', fill: '#475467', fontSize: 10 }} /> : null}
-                    <Line yAxisId="users" type="monotone" dataKey="active" name="Active UEs" stroke="#2563eb" strokeWidth={2.7} dot={false} isAnimationActive={false} />
-                    <Line yAxisId="latency" type="monotone" dataKey="p50" name="P50 latency" stroke="#7c3aed" strokeWidth={2.3} dot={false} isAnimationActive={false} />
-                  </ComposedChart>
-                </ResponsiveContainer>
+              {chartPoints.length ? (
+                <MeasuredChart>
+                  {({ width, height }) => <LatencyBoxPlotChart width={width} height={height} points={chartPoints} maxUsers={chartMaxUsers} />}
+                </MeasuredChart>
               ) : (
-                <ChartEmpty label="Trend appears when the run starts" />
+                <ChartEmpty label="Distribution appears when the run starts" />
               )}
             </div>
             <div className="threshold-stack">
-              <span>High (&gt;300ms)</span>
+              <span>Critical (&gt;300ms)</span>
               <span>Degraded (150-300ms)</span>
-              <span>Good (&lt;=150ms)</span>
+              <span>Healthy (&lt;=150ms)</span>
             </div>
           </div>
         </div>
@@ -605,17 +705,20 @@ function AnalyticsColumn({
       <Panel title="Upload Outcome Distribution">
         <div className="outcome-layout">
           <div className="area-chart-wrap">
-            {historyPoints.length ? (
-              <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
-                <AreaChart data={historyPoints} margin={{ top: 6, right: 6, bottom: 0, left: -24 }}>
-                  <XAxis dataKey="tick" tickFormatter={formatTickLabel} tick={{ fontSize: 10, fill: '#667085' }} tickLine={false} axisLine={false} allowDecimals={false} />
-                  <YAxis domain={[0, 100]} ticks={[0, 50, 100]} tickFormatter={(value) => `${value}%`} tick={{ fontSize: 10, fill: '#667085' }} tickLine={false} axisLine={false} />
-                  <Tooltip contentStyle={{ border: '1px solid #dce3ef', borderRadius: 8, fontSize: 12 }} formatter={(value, name) => [`${Number(value).toFixed(0)}%`, name]} labelFormatter={(value) => formatTickLabel(Number(value))} />
-                  <Area type="monotone" dataKey="goodPct" name="Good" stackId="1" stroke="#22a34a" fill="#86d993" isAnimationActive={false} />
-                  <Area type="monotone" dataKey="degradedPct" name="Degraded" stackId="1" stroke="#f59e0b" fill="#fbd38d" isAnimationActive={false} />
-                  <Area type="monotone" dataKey="highPct" name="High" stackId="1" stroke="#ef4444" fill="#fca5a5" isAnimationActive={false} />
-                </AreaChart>
-              </ResponsiveContainer>
+            {chartPoints.length ? (
+              <MeasuredChart>
+                {({ width, height }) => (
+                  <AreaChart width={width} height={height} data={chartPoints} margin={{ top: 6, right: 6, bottom: 0, left: -24 }}>
+                    <XAxis dataKey="active" type="number" domain={[0, chartMaxUsers]} ticks={activeAxisTicks(chartMaxUsers)} tickFormatter={formatActiveAxis} tick={{ fontSize: 10, fill: '#667085' }} tickLine={false} axisLine={false} allowDecimals={false} />
+                    <YAxis domain={[0, 100]} ticks={[0, 50, 100]} tickFormatter={(value) => `${value}%`} tick={{ fontSize: 10, fill: '#667085' }} tickLine={false} axisLine={false} />
+                    <Tooltip contentStyle={{ border: '1px solid #dce3ef', borderRadius: 8, fontSize: 12 }} formatter={(value, name) => [`${Number(value).toFixed(0)}%`, name]} labelFormatter={(value) => formatActiveLabel(Number(value))} />
+                    <Area type="monotone" dataKey="goodPct" name="Healthy" stackId="1" stroke="#22a34a" fill="#86d993" isAnimationActive={false} />
+                    <Area type="monotone" dataKey="degradedPct" name="Degraded" stackId="1" stroke="#f59e0b" fill="#fbd38d" isAnimationActive={false} />
+                    <Area type="monotone" dataKey="highPct" name="Critical" stackId="1" stroke="#f97316" fill="#fdba74" isAnimationActive={false} />
+                    <Area type="monotone" dataKey="failedPct" name="Failed" stackId="1" stroke="#dc2626" fill="#fca5a5" isAnimationActive={false} />
+                  </AreaChart>
+                )}
+              </MeasuredChart>
             ) : (
               <ChartEmpty label="Outcome history is empty" />
             )}
@@ -623,15 +726,21 @@ function AnalyticsColumn({
           <div className="donut-chart-wrap">
             {activeUsers > 0 ? (
               <>
-                <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
-                  <PieChart>
-                    <Pie data={outcomeData} dataKey="value" nameKey="name" innerRadius={23} outerRadius={36} paddingAngle={1} stroke="none" isAnimationActive={false}>
-                      {outcomeData.map((entry) => (
-                        <Cell key={entry.name} fill={entry.color} />
-                      ))}
-                    </Pie>
-                  </PieChart>
-                </ResponsiveContainer>
+                <MeasuredChart>
+                  {({ width, height }) => {
+                    const outerRadius = Math.max(22, Math.min(width, height) / 2 - 4)
+                    const innerRadius = Math.max(12, outerRadius - 14)
+                    return (
+                      <PieChart width={width} height={height}>
+                        <Pie data={outcomeData} dataKey="value" nameKey="name" innerRadius={innerRadius} outerRadius={outerRadius} paddingAngle={1} stroke="none" isAnimationActive={false}>
+                          {outcomeData.map((entry) => (
+                            <Cell key={entry.name} fill={entry.color} />
+                          ))}
+                        </Pie>
+                      </PieChart>
+                    )
+                  }}
+                </MeasuredChart>
                 <span>{state ? goodLatencyPercent(state) : 0}%</span>
               </>
             ) : (
@@ -639,9 +748,10 @@ function AnalyticsColumn({
             )}
           </div>
           <div className="outcome-list">
-            <OutcomeRow label="Good" value={good} tone="green" />
+            <OutcomeRow label="Healthy" value={good} tone="green" />
             <OutcomeRow label="Degraded" value={delayed} tone="orange" />
-            <OutcomeRow label="High" value={failed} tone="red" />
+            <OutcomeRow label="Critical" value={high} tone="critical" />
+            <OutcomeRow label="Failed" value={failed} tone="red" />
           </div>
         </div>
       </Panel>
@@ -720,6 +830,7 @@ const DeviceBoard = memo(function DeviceBoard({
                 latestResult={deferredResultByID[user.client_id]}
                 latencyHistory={deferredLatencyHistoryByID[user.client_id] ?? []}
                 index={index}
+                runActive={state.running}
               />
             ))}
           </div>
@@ -738,17 +849,23 @@ const DeviceCard = memo(function DeviceCard({
   latestResult,
   latencyHistory,
   index,
+  runActive,
 }: {
   user: DemoUser
   latestResult?: UploadResult
   latencyHistory: number[]
   index: number
+  runActive: boolean
 }) {
   const online = isUserOnline(user)
   const displayStatus = latestResult ? classifyResultStatus(latestResult) : online && user.status === 'planned' ? 'idle' : user.status
   const displayLatencyMS = latestResult?.latency_ms ?? user.last_latency_ms ?? 0
   const treatment = treatmentMeta(user)
   const treatmentClass = user.treatment === 'reserved' ? 'treatment-reserved' : 'treatment-public'
+  const uploadProgressActive = runActive && latestResult?.success === true
+  const uploadProgressSeed = `${user.client_id}:${latestResult?.attempt ?? user.attempts}:${latestResult?.at ?? user.last_seen ?? ''}`
+  const uploadProgressPhase = hashToUnit(`${uploadProgressSeed}:phase`)
+  const uploadProgressDuration = 1
 
   return (
     <motion.article
@@ -770,14 +887,19 @@ const DeviceCard = memo(function DeviceCard({
 
       <div className="ue-card-body">
         <div
-          className="ue-health-indicator"
+          className={`ue-health-indicator ${uploadProgressActive ? 'is-upload-progress' : ''}`}
           style={
             {
-              '--ring': ringPathLength(displayStatus),
-              '--ring-color': statusColor(displayStatus),
+              '--ring': uploadProgressActive ? 0.82 : ringPathLength(displayStatus),
+              '--ring-color': uploadProgressActive ? '#0ea5e9' : statusColor(displayStatus),
+              '--upload-cycle-duration': `${uploadProgressDuration.toFixed(3)}s`,
+              '--upload-cycle-delay': `-${(uploadProgressPhase * uploadProgressDuration).toFixed(3)}s`,
             } as CSSProperties
           }
-          aria-hidden="true"
+          role={uploadProgressActive ? 'progressbar' : undefined}
+          aria-label={uploadProgressActive ? `${ueLabel(user)} upload progress` : undefined}
+          aria-valuetext={uploadProgressActive ? 'Cycling after successful upload' : undefined}
+          aria-hidden={uploadProgressActive ? undefined : true}
         >
           <svg className="progress-ring" viewBox="0 0 44 44">
             <circle className="ring-track" cx="22" cy="22" r="17.5" pathLength="1" />
@@ -882,8 +1004,134 @@ function SparkBars({ samples, tall = false }: { samples: number[]; tall?: boolea
   )
 }
 
+function LatencyBoxPlotChart({
+  width,
+  height,
+  points,
+  maxUsers,
+}: {
+  width: number
+  height: number
+  points: HistoryPoint[]
+  maxUsers: number
+}) {
+  const [tooltip, setTooltip] = useState<{ left: number; top: number; point: BoxPlotPoint } | null>(null)
+  const margin = { top: 10, right: 42, bottom: 26, left: 34 }
+  const innerWidth = Math.max(1, width - margin.left - margin.right)
+  const innerHeight = Math.max(1, height - margin.top - margin.bottom)
+  const plotPoints = points
+    .map((point) => {
+      const box = boxPlotStats(point.latencies)
+      return box ? { ...point, box } : null
+    })
+    .filter((point): point is BoxPlotPoint => Boolean(point))
+  const y = (value: number) => margin.top + (1 - clampChartLatency(value) / 1000) * innerHeight
+  const x = (active: number) => margin.left + (active / Math.max(maxUsers, 1)) * innerWidth
+  const yTicks = [0, 150, 300, 600, 1000]
+  const xTicks = activeAxisTicks(maxUsers)
+  const boxWidth = Math.max(10, Math.min(24, (innerWidth / Math.max(plotPoints.length, 1)) * 0.62))
+
+  return (
+    <div className="latency-box-plot">
+      <svg width={width} height={height} role="img" aria-label="Latency box plot by active UE count">
+        <rect className="box-band band-critical" x={margin.left} y={y(1000)} width={innerWidth} height={Math.max(0, y(300) - y(1000))} />
+        <rect className="box-band band-degraded" x={margin.left} y={y(300)} width={innerWidth} height={Math.max(0, y(150) - y(300))} />
+        <rect className="box-band band-healthy" x={margin.left} y={y(150)} width={innerWidth} height={Math.max(0, y(0) - y(150))} />
+
+        {yTicks.map((tick) => (
+          <g key={tick}>
+            <line className="box-grid-line" x1={margin.left} x2={margin.left + innerWidth} y1={y(tick)} y2={y(tick)} />
+            <text className="box-axis-label y-label" x={margin.left + innerWidth + 8} y={y(tick) + 3}>{formatLatencyAxis(tick)}</text>
+          </g>
+        ))}
+
+        {xTicks.map((tick) => (
+          <g key={tick}>
+            <line className="box-x-tick" x1={x(tick)} x2={x(tick)} y1={margin.top + innerHeight} y2={margin.top + innerHeight + 4} />
+            <text className="box-axis-label x-label" x={x(tick)} y={margin.top + innerHeight + 17}>{tick}</text>
+          </g>
+        ))}
+
+        <line className="box-axis-line" x1={margin.left} x2={margin.left + innerWidth} y1={margin.top + innerHeight} y2={margin.top + innerHeight} />
+        <line className="box-axis-line" x1={margin.left} x2={margin.left} y1={margin.top} y2={margin.top + innerHeight} />
+
+        {plotPoints.map((point) => {
+          const pointX = x(point.active)
+          const minY = y(point.box.min)
+          const q1Y = y(point.box.q1)
+          const medianY = y(point.box.median)
+          const q3Y = y(point.box.q3)
+          const maxY = y(point.box.max)
+          const boxHeight = Math.max(4, q1Y - q3Y)
+          const boxTop = q1Y - q3Y < 4 ? medianY - boxHeight / 2 : q3Y
+          const boxTone = latencyToneForDistribution(point.box.q3, point.p99)
+          return (
+            <g
+              className={`box-plot-point tone-${boxTone}`}
+              key={`${point.tick}-${point.active}`}
+              onMouseMove={(event) => {
+                const rect = event.currentTarget.ownerSVGElement?.getBoundingClientRect()
+                setTooltip({
+                  left: rect ? event.clientX - rect.left + 12 : pointX + 12,
+                  top: rect ? event.clientY - rect.top + 12 : medianY + 12,
+                  point,
+                })
+              }}
+              onMouseLeave={() => setTooltip(null)}
+            >
+              <line className="box-whisker" x1={pointX} x2={pointX} y1={maxY} y2={minY} />
+              <line className="box-cap" x1={pointX - boxWidth * 0.5} x2={pointX + boxWidth * 0.5} y1={minY} y2={minY} />
+              <line className="box-cap" x1={pointX - boxWidth * 0.5} x2={pointX + boxWidth * 0.5} y1={maxY} y2={maxY} />
+              <rect className="box-iqr" x={pointX - boxWidth / 2} y={boxTop} width={boxWidth} height={boxHeight} rx={2.5} />
+              <line className="box-median" x1={pointX - boxWidth / 2} x2={pointX + boxWidth / 2} y1={medianY} y2={medianY} />
+              {point.failedCount > 0 ? <circle className="box-failed-dot" cx={pointX + boxWidth * 0.62} cy={y(1000) + 8} r={Math.min(5, 2.5 + point.failedCount / 4)} /> : null}
+            </g>
+          )
+        })}
+      </svg>
+      {tooltip ? (
+        <div className="box-tooltip" style={{ left: tooltip.left, top: tooltip.top }}>
+          <strong>{formatActiveLabel(tooltip.point.active)}</strong>
+          <span>Min {formatLatency(tooltip.point.box.min)} / P25 {formatLatency(tooltip.point.box.q1)}</span>
+          <span>Median {formatLatency(tooltip.point.box.median)} / P75 {formatLatency(tooltip.point.box.q3)}</span>
+          <span>Max {formatLatency(tooltip.point.box.max)}</span>
+          <em>
+            Healthy {tooltip.point.goodCount} / Degraded {tooltip.point.degradedCount} / Critical {tooltip.point.highCount} / Failed {tooltip.point.failedCount}
+          </em>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function ChartEmpty({ label }: { label: string }) {
   return <div className="chart-empty-label">{label}</div>
+}
+
+function MeasuredChart({ children }: { children: (size: { width: number; height: number }) => ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [size, setSize] = useState({ width: 0, height: 0 })
+
+  useEffect(() => {
+    const node = ref.current
+    if (!node) {
+      return undefined
+    }
+
+    const updateSize = () => {
+      const rect = node.getBoundingClientRect()
+      const width = Math.floor(rect.width)
+      const height = Math.floor(rect.height)
+      setSize((current) => (current.width === width && current.height === height ? current : { width, height }))
+    }
+
+    updateSize()
+    const observer = new ResizeObserver(updateSize)
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [])
+
+  return <div className="measured-chart" ref={ref}>{size.width > 0 && size.height > 0 ? children(size) : null}</div>
 }
 
 function labelForFilter(filter: BoardFilter) {
@@ -951,46 +1199,59 @@ function formatLatencyAxis(value: number) {
   return value >= 1000 ? '1000ms+' : `${value}ms`
 }
 
-function formatTickLabel(value: number) {
+function latencyToneForP75(latencyMS: number) {
+  if (latencyMS >= 900) {
+    return 'failed'
+  }
+  if (latencyMS <= 150) {
+    return 'healthy'
+  }
+  if (latencyMS <= 300) {
+    return 'degraded'
+  }
+  return 'critical'
+}
+
+function latencyToneForDistribution(p75MS: number, p99MS: number) {
+  const p75Tone = latencyToneForP75(p75MS)
+  if (p75Tone === 'healthy' && p99MS > 150) {
+    return 'degraded'
+  }
+  return p75Tone
+}
+
+function formatActiveAxis(value: number) {
   if (!Number.isFinite(value)) {
     return ''
   }
-  return `T+${value}`
+  return value.toFixed(0)
 }
 
-function formatTrendTooltip(value: unknown, name: unknown): [ReactNode, string] {
-  const numeric = Number(value)
-  const label = String(name)
-  if (!Number.isFinite(numeric)) {
-    return [String(value), label]
+function formatActiveLabel(value: number) {
+  if (!Number.isFinite(value)) {
+    return ''
   }
-  if (label === 'Active UEs') {
-    return [numeric.toFixed(0), label]
+  return `${value.toFixed(0)} active UEs`
+}
+
+function compactHistoryByActive(points: HistoryPoint[]) {
+  const latestByActive = new Map<number, HistoryPoint>()
+  for (const point of points) {
+    latestByActive.set(point.active, point)
   }
-  return [formatLatency(numeric), label]
+  return [...latestByActive.values()].sort((left, right) => left.active - right.active)
 }
 
-function sparkPath(values: number[]) {
-  const safeValues = values.length > 1 ? values : [0, 0]
-  const max = Math.max(...safeValues, 1)
-  const min = Math.min(...safeValues, 0)
-  const range = Math.max(max - min, 1)
-  return safeValues
-    .map((value, index) => {
-      const x = (index / (safeValues.length - 1)) * 180
-      const y = 34 - ((value - min) / range) * 28
-      return `${index === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`
-    })
-    .join(' ')
-}
-
-function normalizeTrend(values: number[]) {
-  const samples = values.slice(-12)
-  return samples.length > 1 ? samples : [0, 0]
+function compactOutcomeHistory(points: HistoryPoint[]): OutcomeHistoryPoint[] {
+  return compactHistoryByActive(points).map(({ active, goodPct, degradedPct, highPct, failedPct }) => ({ active, goodPct, degradedPct, highPct, failedPct }))
 }
 
 function goodLatencyPercent(state: DemoState) {
   return state.counters.active_users > 0 ? Math.round((state.counters.good_users / state.counters.active_users) * 100) : 0
+}
+
+function criticalPercent(state: DemoState) {
+  return state.counters.active_users > 0 ? Math.round((state.counters.high_users / state.counters.active_users) * 100) : 0
 }
 
 function failedPercent(state: DemoState) {
@@ -1014,6 +1275,58 @@ function percentile(samples: number[], fraction: number) {
   return sorted[index]
 }
 
+function boxPlotStats(samples: number[]): BoxPlotStats | null {
+  const sorted = samples
+    .map(clampChartLatency)
+    .filter((value) => value > 0)
+    .sort((left, right) => left - right)
+  if (sorted.length === 0) {
+    return null
+  }
+  return {
+    min: sorted[0],
+    q1: quantileSorted(sorted, 0.25),
+    median: quantileSorted(sorted, 0.5),
+    q3: quantileSorted(sorted, 0.75),
+    max: sorted[sorted.length - 1],
+  }
+}
+
+function quantileSorted(values: number[], fraction: number) {
+  if (values.length === 1) {
+    return values[0]
+  }
+  const position = (values.length - 1) * fraction
+  const lowerIndex = Math.floor(position)
+  const upperIndex = Math.ceil(position)
+  const weight = position - lowerIndex
+  return values[lowerIndex] + (values[upperIndex] - values[lowerIndex]) * weight
+}
+
+function activeAxisTicks(maxUsers: number) {
+  const safeMax = Math.max(1, Math.ceil(maxUsers))
+  const step = safeMax <= 50 ? 5 : 10
+  const ticks: number[] = []
+  for (let value = 0; value <= safeMax; value += step) {
+    ticks.push(value)
+  }
+  if (ticks.at(-1) !== safeMax) {
+    ticks.push(safeMax)
+  }
+  return ticks
+}
+
+function appendHistoryPoint(points: HistoryPoint[], point: HistoryPoint) {
+  if (!shouldRecordHistoryPoint(point)) {
+    return points
+  }
+  return [...points.filter((existing) => existing.active !== point.active), point].slice(-90)
+}
+
+function shouldRecordHistoryPoint(point: HistoryPoint) {
+  return point.active === 0 || point.latencies.length >= point.active
+}
+
 function makeHistoryPoint(state: DemoState, tick: number): HistoryPoint {
   const stateLatencies = state.users
     .filter((user) => user.active)
@@ -1029,12 +1342,85 @@ function makeHistoryPoint(state: DemoState, tick: number): HistoryPoint {
     p99: clampChartLatency(percentile(stateLatencies, 0.99)),
     goodPct: percentOfActive(state.counters.good_users),
     degradedPct: percentOfActive(state.counters.delayed_users),
-    highPct: percentOfActive(state.counters.failed_users),
+    highPct: percentOfActive(state.counters.high_users),
+    failedPct: percentOfActive(state.counters.failed_users),
+    goodCount: state.counters.good_users,
+    degradedCount: state.counters.delayed_users,
+    highCount: state.counters.high_users,
+    failedCount: state.counters.failed_users,
     prioritized: prioritizedCount(state),
     temporary: state.counters.temporary_grants,
     capacity: state.bandwidth.total_rate_mbps,
     latencies: stateLatencies,
   }
+}
+
+function makeHistoryPointFromResults(state: DemoState, items: UploadResult[], tick: number): HistoryPoint | null {
+  const resultByID = new Map(items.map((item) => [item.id, item]))
+  const bucketSize = completedResultBucketSize(state, items.length)
+  if (bucketSize <= 0) {
+    return null
+  }
+  const reportingUsers = state.users.filter((user) => resultByID.has(user.client_id)).slice(0, bucketSize)
+  const selectedItems = reportingUsers
+    .map((user) => resultByID.get(user.client_id))
+    .filter((item): item is UploadResult => Boolean(item))
+  if (selectedItems.length < bucketSize) {
+    return null
+  }
+  const resultLatencies = selectedItems
+    .map((item) => item.latency_ms)
+    .filter((value) => value > 0)
+  let goodCount = 0
+  let degradedCount = 0
+  let highCount = 0
+  let failedCount = 0
+
+  for (const item of selectedItems) {
+    switch (classifyResultStatus(item)) {
+      case 'good':
+        goodCount++
+        break
+      case 'delayed':
+        degradedCount++
+        break
+      case 'high':
+        highCount++
+        break
+      case 'failed':
+        failedCount++
+        break
+      default:
+        break
+    }
+  }
+
+  const percentOfActive = (value: number) => Math.round((value / bucketSize) * 100)
+
+  return {
+    tick,
+    active: bucketSize,
+    p50: clampChartLatency(percentile(resultLatencies, 0.5)),
+    p99: clampChartLatency(percentile(resultLatencies, 0.99)),
+    goodPct: percentOfActive(goodCount),
+    degradedPct: percentOfActive(degradedCount),
+    highPct: percentOfActive(highCount),
+    failedPct: percentOfActive(failedCount),
+    goodCount,
+    degradedCount,
+    highCount,
+    failedCount,
+    prioritized: prioritizedCount({ ...state, users: reportingUsers }),
+    temporary: treatmentCounts(reportingUsers).temporary,
+    capacity: state.bandwidth.total_rate_mbps,
+    latencies: resultLatencies,
+  }
+}
+
+function completedResultBucketSize(state: DemoState, resultCount: number) {
+  const rampStep = state.ramp_per_second > 0 ? state.ramp_per_second : 5
+  const plannedUsers = state.users.length || resultCount
+  return Math.min(Math.floor(resultCount / rampStep) * rampStep, plannedUsers)
 }
 
 function treatmentCounts(users: DemoUser[]) {
@@ -1102,10 +1488,21 @@ function latestLatency(user: DemoUser, resultByID: Record<string, UploadResult>)
   return resultByID[user.client_id]?.latency_ms ?? user.last_latency_ms ?? 0
 }
 
+function hashToUnit(value: string) {
+  let hash = 2166136261
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0) / 4294967295
+}
+
 function statusRank(user: DemoUser, resultByID: Record<string, UploadResult>) {
   const status = resultByID[user.client_id] ? classifyResultStatus(resultByID[user.client_id]) : user.status
   switch (status) {
     case 'failed':
+      return 6
+    case 'high':
       return 5
     case 'delayed':
       return 4
@@ -1131,7 +1528,7 @@ function classifyResultStatus(result: UploadResult): DemoUserStatus {
   if (result.latency_ms <= 300) {
     return 'delayed'
   }
-  return 'failed'
+  return 'high'
 }
 
 function ringPathLength(status: DemoUserStatus) {
@@ -1140,6 +1537,8 @@ function ringPathLength(status: DemoUserStatus) {
       return 0.86
     case 'delayed':
       return 0.62
+    case 'high':
+      return 0.78
     case 'failed':
       return 0.92
     case 'running':
@@ -1158,8 +1557,10 @@ function statusColor(status: DemoUserStatus) {
       return '#24a148'
     case 'delayed':
       return '#f59e0b'
+    case 'high':
+      return '#f97316'
     case 'failed':
-      return '#ef4444'
+      return '#dc2626'
     case 'running':
       return '#2563eb'
     case 'idle':
@@ -1176,7 +1577,7 @@ function scenarioStyle(strategy: StrategyName) {
         tone: 'blue' as const,
         short: 'Static reservation',
         icon: <Shield size={16} />,
-        expectation: 'Guarantees 30 UEs; later UEs compete.',
+        expectation: 'Guarantees 20 UEs; later UEs compete.',
       }
     case 'dynamic_qos':
       return {

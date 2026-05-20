@@ -133,11 +133,11 @@ func TestStrategyProfile(t *testing.T) {
 	if got := strategyProfile(StrategyNoOptimization, 0); got != ProfilePublic {
 		t.Fatalf("no optimization profile = %q, want public", got)
 	}
-	if got := strategyProfile(StrategyStandardGBR, 29); got != ProfileOptimized {
-		t.Fatalf("standard GBR index 29 = %q, want optimized", got)
+	if got := strategyProfile(StrategyStandardGBR, demoStandardGBRGuaranteedUsers-1); got != ProfileOptimized {
+		t.Fatalf("standard GBR last guaranteed index = %q, want optimized", got)
 	}
-	if got := strategyProfile(StrategyStandardGBR, 30); got != ProfilePublic {
-		t.Fatalf("standard GBR index 30 = %q, want public", got)
+	if got := strategyProfile(StrategyStandardGBR, demoStandardGBRGuaranteedUsers); got != ProfilePublic {
+		t.Fatalf("standard GBR first public index = %q, want public", got)
 	}
 	if got := strategyProfile(StrategyDynamicQoS, 49); got != ProfileOptimized {
 		t.Fatalf("dynamic QoS profile = %q, want optimized", got)
@@ -152,7 +152,7 @@ func TestClassifyLatency(t *testing.T) {
 		{latency: 150, want: outcomeGood},
 		{latency: 150.1, want: outcomeDelayed},
 		{latency: 300, want: outcomeDelayed},
-		{latency: 300.1, want: outcomeFailed},
+		{latency: 300.1, want: outcomeHigh},
 	}
 	for _, tc := range cases {
 		if got := classifyLatency(tc.latency); got != tc.want {
@@ -192,11 +192,20 @@ func TestMetricsReportOutcomes(t *testing.T) {
 		Bytes:     1024,
 	})
 	store.addSample(ClientSample{
-		ClientID: "mockue-cli-31",
-		ClientIP: "10.30.31.2",
-		Profile:  ProfilePublic,
-		Error:    "timeout",
-		Bytes:    1024,
+		ClientID:  "mockue-cli-31",
+		ClientIP:  "10.30.31.2",
+		Profile:   ProfilePublic,
+		Success:   true,
+		LatencyMS: 340,
+		Bytes:     1024,
+	})
+	store.addSample(ClientSample{
+		ClientID:  "mockue-cli-31",
+		ClientIP:  "10.30.31.2",
+		Profile:   ProfilePublic,
+		Error:     "timeout",
+		LatencyMS: 900,
+		Bytes:     1024,
 	})
 
 	report := store.report()
@@ -206,7 +215,7 @@ func TestMetricsReportOutcomes(t *testing.T) {
 	if report.ProtectedClients != 1 {
 		t.Fatalf("protected clients = %d, want 1", report.ProtectedClients)
 	}
-	if report.Outcomes.Attempts != 4 || report.Outcomes.Good != 2 || report.Outcomes.Delayed != 1 || report.Outcomes.Failed != 1 {
+	if report.Outcomes.Attempts != 5 || report.Outcomes.Good != 2 || report.Outcomes.Delayed != 1 || report.Outcomes.High != 1 || report.Outcomes.Failed != 1 {
 		t.Fatalf("unexpected aggregate outcomes: %+v", report.Outcomes)
 	}
 	if report.Aggregate.Errors != 1 {
@@ -214,6 +223,12 @@ func TestMetricsReportOutcomes(t *testing.T) {
 	}
 	if report.Clients[0].Outcomes.Attempts == 0 || report.Clients[1].Outcomes.Attempts == 0 {
 		t.Fatalf("expected per-client outcomes in report: %+v", report.Clients)
+	}
+	if report.Clients[1].LastSuccess {
+		t.Fatalf("public client last_success = true, want false after timeout")
+	}
+	if report.Clients[1].LastLatencyMS != 900 {
+		t.Fatalf("public client last latency = %v, want timeout latency", report.Clients[1].LastLatencyMS)
 	}
 }
 

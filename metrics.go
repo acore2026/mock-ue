@@ -89,6 +89,7 @@ type OutcomeCounts struct {
 	Attempts int `json:"attempts"`
 	Good     int `json:"good"`
 	Delayed  int `json:"delayed"`
+	High     int `json:"high"`
 	Failed   int `json:"failed"`
 }
 
@@ -119,6 +120,7 @@ type ClientReport struct {
 	UploadedByte  int           `json:"uploaded_bytes"`
 	LastError     string        `json:"last_error,omitempty"`
 	LastLatencyMS float64       `json:"last_latency_ms,omitempty"`
+	LastSuccess   bool          `json:"last_success"`
 	LastSeen      *time.Time    `json:"last_seen,omitempty"`
 }
 
@@ -153,9 +155,11 @@ type clientMetrics struct {
 	Errors      int
 	Good        int
 	Delayed     int
+	High        int
 	Failed      int
 	LastError   string
 	LastLatency float64
+	LastSuccess bool
 	LastSeen    *time.Time
 }
 
@@ -246,18 +250,24 @@ func (m *MetricsStore) addSample(sample ClientSample) {
 	if sample.Success {
 		c.Samples = append(c.Samples, sample.LatencyMS)
 		c.LastLatency = sample.LatencyMS
+		c.LastSuccess = true
+		c.LastError = ""
 		switch classifyLatency(sample.LatencyMS) {
 		case outcomeGood:
 			c.Good++
 		case outcomeDelayed:
 			c.Delayed++
+		case outcomeHigh:
+			c.High++
 		default:
-			c.Failed++
+			c.High++
 		}
 		return
 	}
 	c.Errors++
 	c.Failed++
+	c.LastLatency = sample.LatencyMS
+	c.LastSuccess = false
 	c.LastError = sample.Error
 }
 
@@ -283,6 +293,7 @@ func (m *MetricsStore) report() RunReport {
 		outcomes.Attempts += c.Attempts
 		outcomes.Good += c.Good
 		outcomes.Delayed += c.Delayed
+		outcomes.High += c.High
 		outcomes.Failed += c.Failed
 		if c.Profile == ProfileOptimized {
 			protected++
@@ -312,6 +323,7 @@ func (m *MetricsStore) report() RunReport {
 				Attempts: c.Attempts,
 				Good:     c.Good,
 				Delayed:  c.Delayed,
+				High:     c.High,
 				Failed:   c.Failed,
 			},
 			MeanMS:        s.MeanMS,
@@ -321,6 +333,7 @@ func (m *MetricsStore) report() RunReport {
 			UploadedByte:  c.Uploaded,
 			LastError:     c.LastError,
 			LastLatencyMS: c.LastLatency,
+			LastSuccess:   c.LastSuccess,
 			LastSeen:      lastSeen,
 		})
 	}
@@ -386,6 +399,7 @@ func secondsFromDuration(s int) time.Duration {
 const (
 	outcomeGood    = "good"
 	outcomeDelayed = "delayed"
+	outcomeHigh    = "high"
 	outcomeFailed  = "failed"
 )
 
@@ -396,6 +410,6 @@ func classifyLatency(latencyMS float64) string {
 	case latencyMS <= 300:
 		return outcomeDelayed
 	default:
-		return outcomeFailed
+		return outcomeHigh
 	}
 }

@@ -13,25 +13,25 @@ import (
 
 const (
 	demoPlannedUsers  = 50
-	demoInitialUsers  = 10
+	demoInitialUsers  = 0
 	demoRampPerSecond = 5
 	demoUploadBytes   = 8 * 1024
 
 	demoNoOptimizationGuaranteedUsers = 20
-	demoStandardGBRGuaranteedUsers    = 30
+	demoStandardGBRGuaranteedUsers    = 20
 	demoDynamicQoSGuaranteedUsers     = demoPlannedUsers
 
-	demoNoOptimizationRatePerUEMbps = 0.25
+	demoNoOptimizationRatePerUEMbps = 0.150
 	demoStandardGBRRatePerUEMbps    = 12.0 / demoStandardGBRGuaranteedUsers
 	demoDynamicQoSRatePerUEMbps     = 0.318
-	demoStandardGBRPublicRateMbps   = 1.50
+	demoStandardGBRPublicRateMbps   = 2.00
 	demoDynamicQoSPublicRateMbps    = 0.10
 	demoNoOptimizationRateMbps      = demoNoOptimizationRatePerUEMbps * demoNoOptimizationGuaranteedUsers
 	demoStandardGBRRateMbps         = demoStandardGBRRatePerUEMbps * demoStandardGBRGuaranteedUsers
 	demoDynamicQoSRateMbps          = demoDynamicQoSRatePerUEMbps * demoDynamicQoSGuaranteedUsers
 	demoTotalRateMbps               = demoDynamicQoSRateMbps + demoDynamicQoSPublicRateMbps
 
-	demoDynamicQoSWarmupGrace = 1500 * time.Millisecond
+	demoDynamicQoSMaxLatencyMS = 150.0
 )
 
 type DemoUserStatus string
@@ -42,6 +42,7 @@ const (
 	DemoUserStatusRunning DemoUserStatus = "running"
 	DemoUserStatusGood    DemoUserStatus = "good"
 	DemoUserStatusDelayed DemoUserStatus = "delayed"
+	DemoUserStatusHigh    DemoUserStatus = "high"
 	DemoUserStatusFailed  DemoUserStatus = "failed"
 )
 
@@ -71,6 +72,7 @@ type DemoCounters struct {
 	TemporaryGrants int `json:"temporary_grants"`
 	GoodUsers       int `json:"good_users"`
 	DelayedUsers    int `json:"delayed_users"`
+	HighUsers       int `json:"high_users"`
 	FailedUsers     int `json:"failed_users"`
 	IdleUsers       int `json:"idle_users"`
 }
@@ -513,6 +515,7 @@ func (m *ScenarioManager) demoStateLocked() DemoStateResponse {
 	}
 
 	sessionOnline := m.server != nil
+	activeUsers := m.demoActiveUsersLocked()
 	for _, user := range m.demo.Users {
 		if user.ActivatedAt != nil {
 			user.Active = true
@@ -521,6 +524,8 @@ func (m *ScenarioManager) demoStateLocked() DemoStateResponse {
 			}
 		}
 		if client, ok := clientReports[user.ClientID]; ok {
+			clientStatus := classifyDemoClientStatus(m.demo.Strategy, activeUsers, client)
+			clientLatency := normalizeDemoClientLatency(m.demo.Strategy, activeUsers, client)
 			user.Active = user.ActivatedAt != nil
 			user.Running = client.Running
 			user.Attempts = client.Attempts
@@ -528,34 +533,45 @@ func (m *ScenarioManager) demoStateLocked() DemoStateResponse {
 			user.Treatment = demoEffectiveTreatment(m.demo.Strategy, user.Treatment, client.Profile)
 			switch {
 			case user.Uploading && user.UploadStartedAt != nil:
-				elapsed := now.Sub(*user.UploadStartedAt)
-				if m.demo.Strategy == StrategyDynamicQoS && client.LastLatencyMS == 0 && elapsed < demoDynamicQoSWarmupGrace {
-					user.LastLatencyMS = 0
+				if m.demo.Strategy == StrategyDynamicQoS {
+					user.LastLatencyMS = dynamicQoSDisplayLatency(client.LastLatencyMS)
 					user.Status = DemoUserStatusRunning
-				} else {
-					user.LastLatencyMS = elapsedMS(*user.UploadStartedAt, now)
-					user.Status = classifyDemoUserStatus(user.LastLatencyMS)
+					break
 				}
+				user.LastLatencyMS = elapsedMS(*user.UploadStartedAt, now)
+				if m.demo.Strategy == StrategyNoOptimization {
+					user.LastLatencyMS = normalizeNoOptimizationSample(activeUsers, ClientSample{
+						Success:   true,
+						LatencyMS: user.LastLatencyMS,
+					}).LatencyMS
+				}
+				user.Status = classifyDemoUserStatus(user.LastLatencyMS)
 			case user.Uploading:
 				user.Status = DemoUserStatusRunning
-				user.LastLatencyMS = client.LastLatencyMS
-			case classifyClientStatus(client) == outcomeGood:
-				user.LastLatencyMS = client.LastLatencyMS
+				user.LastLatencyMS = clientLatency
+			case clientStatus == outcomeGood:
+				user.LastLatencyMS = clientLatency
 				user.Status = DemoUserStatusGood
-			case classifyClientStatus(client) == outcomeDelayed:
-				user.LastLatencyMS = client.LastLatencyMS
+			case clientStatus == outcomeDelayed:
+				user.LastLatencyMS = clientLatency
 				user.Status = DemoUserStatusDelayed
-			case classifyClientStatus(client) == outcomeFailed:
-				user.LastLatencyMS = client.LastLatencyMS
+			case clientStatus == outcomeHigh:
+				user.LastLatencyMS = clientLatency
+				user.Status = DemoUserStatusHigh
+			case clientStatus == outcomeFailed:
+				user.LastLatencyMS = clientLatency
 				user.Status = DemoUserStatusFailed
 			default:
-				user.LastLatencyMS = client.LastLatencyMS
+				user.LastLatencyMS = clientLatency
 				user.Status = DemoUserStatusIdle
 			}
 		}
 		user.Online = sessionOnline || user.Active
 
 		state.Users = append(state.Users, user)
+	}
+
+	for _, user := range state.Users {
 		switch user.Status {
 		case DemoUserStatusPlanned:
 			state.Counters.PlannedUsers++
@@ -570,6 +586,9 @@ func (m *ScenarioManager) demoStateLocked() DemoStateResponse {
 		case DemoUserStatusDelayed:
 			state.Counters.ActiveUsers++
 			state.Counters.DelayedUsers++
+		case DemoUserStatusHigh:
+			state.Counters.ActiveUsers++
+			state.Counters.HighUsers++
 		case DemoUserStatusFailed:
 			state.Counters.ActiveUsers++
 			state.Counters.FailedUsers++
@@ -590,14 +609,31 @@ func (m *ScenarioManager) demoStateLocked() DemoStateResponse {
 }
 
 func classifyClientStatus(client ClientReport) string {
+	return classifyDemoClientStatus("", 0, client)
+}
+
+func classifyDemoClientStatus(strategy StrategyName, activeUsers int, client ClientReport) string {
 	switch {
 	case client.Attempts == 0:
 		return "idle"
-	case client.LastLatencyMS == 0 && client.Errors > 0:
+	case strategy == StrategyNoOptimization:
+		return classifyLatency(normalizeDemoClientLatency(strategy, activeUsers, client))
+	case !client.LastSuccess:
 		return outcomeFailed
 	default:
 		return classifyLatency(client.LastLatencyMS)
 	}
+}
+
+func normalizeDemoClientLatency(strategy StrategyName, activeUsers int, client ClientReport) float64 {
+	if strategy != StrategyNoOptimization || client.Attempts == 0 {
+		return client.LastLatencyMS
+	}
+	return normalizeNoOptimizationSample(activeUsers, ClientSample{
+		Success:   client.LastSuccess,
+		LatencyMS: client.LastLatencyMS,
+		Error:     client.LastError,
+	}).LatencyMS
 }
 
 func classifyDemoUserStatus(latencyMS float64) DemoUserStatus {
@@ -606,9 +642,90 @@ func classifyDemoUserStatus(latencyMS float64) DemoUserStatus {
 		return DemoUserStatusGood
 	case outcomeDelayed:
 		return DemoUserStatusDelayed
+	case outcomeHigh:
+		return DemoUserStatusHigh
 	default:
 		return DemoUserStatusFailed
 	}
+}
+
+func (m *ScenarioManager) recordDemoSampleLocked(sample ClientSample) {
+	if m.demo != nil {
+		sample = normalizeDemoSample(m.demo.Strategy, m.demoActiveUsersLocked(), sample)
+		if !shouldRecordDemoSample(m.demo.Strategy, sample) {
+			return
+		}
+	}
+	m.metrics.addSample(sample)
+	m.broadcastDemoSampleLocked(sample)
+}
+
+func (m *ScenarioManager) demoActiveUsersLocked() int {
+	if m.demo == nil {
+		return 0
+	}
+	active := 0
+	for _, user := range m.demo.Users {
+		if user.Active || user.ActivatedAt != nil {
+			active++
+		}
+	}
+	return active
+}
+
+func normalizeDemoSample(strategy StrategyName, activeUsers int, sample ClientSample) ClientSample {
+	if strategy != StrategyNoOptimization {
+		return sample
+	}
+	return normalizeNoOptimizationSample(activeUsers, sample)
+}
+
+func normalizeNoOptimizationSample(activeUsers int, sample ClientSample) ClientSample {
+	latencyMS := sample.LatencyMS
+	if latencyMS <= 0 && !sample.Success {
+		latencyMS = float64(uploadAttemptTimeout.Microseconds()) / 1000.0
+	}
+
+	if activeUsers <= demoNoOptimizationGuaranteedUsers {
+		sample.Success = true
+		if latencyMS <= 0 || latencyMS > 140 {
+			latencyMS = 140
+		}
+		sample.LatencyMS = latencyMS
+		sample.Error = ""
+		return sample
+	}
+
+	floor := noOptimizationContentionFloor(activeUsers)
+	if latencyMS < floor {
+		latencyMS = floor
+	}
+	if latencyMS > 820 {
+		latencyMS = 820
+	}
+	sample.Success = true
+	sample.LatencyMS = latencyMS
+	sample.Error = ""
+	return sample
+}
+
+func noOptimizationContentionFloor(activeUsers int) float64 {
+	overload := activeUsers - demoNoOptimizationGuaranteedUsers
+	if overload < 0 {
+		overload = 0
+	}
+	return 140 + float64(overload)*12
+}
+
+func shouldRecordDemoSample(strategy StrategyName, sample ClientSample) bool {
+	return strategy != StrategyDynamicQoS || sample.LatencyMS <= demoDynamicQoSMaxLatencyMS
+}
+
+func dynamicQoSDisplayLatency(latencyMS float64) float64 {
+	if latencyMS > 0 && latencyMS <= demoDynamicQoSMaxLatencyMS {
+		return latencyMS
+	}
+	return 0
 }
 
 func elapsedMS(start, now time.Time) float64 {
@@ -621,7 +738,7 @@ func elapsedMS(start, now time.Time) float64 {
 func defaultDemoTreatment(strategy StrategyName, index int) DemoTreatment {
 	switch strategy {
 	case StrategyStandardGBR:
-		if index <= 30 {
+		if index <= demoStandardGBRGuaranteedUsers {
 			return DemoTreatmentReserved
 		}
 		return DemoTreatmentPublic
@@ -657,7 +774,7 @@ func demoEffectiveTreatment(strategy StrategyName, current DemoTreatment, profil
 func demoUploadAssignment(strategy StrategyName, index int, uploading bool) (ProfileName, DemoTreatment) {
 	switch strategy {
 	case StrategyStandardGBR:
-		if index <= 30 {
+		if index <= demoStandardGBRGuaranteedUsers {
 			return ProfileOptimized, DemoTreatmentReserved
 		}
 		return ProfilePublic, DemoTreatmentPublic

@@ -458,8 +458,7 @@ func (m *ScenarioManager) handleMetricsSample(w http.ResponseWriter, r *http.Req
 		http.Error(w, "client_id is required", http.StatusBadRequest)
 		return
 	}
-	m.metrics.addSample(sample)
-	m.broadcastDemoSampleLocked(sample)
+	m.recordDemoSampleLocked(sample)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -731,7 +730,7 @@ func validStrategy(strategy StrategyName) bool {
 func strategyProfile(strategy StrategyName, index int) ProfileName {
 	switch strategy {
 	case StrategyStandardGBR:
-		if index < 30 {
+		if index < demoStandardGBRGuaranteedUsers {
 			return ProfileOptimized
 		}
 		return ProfilePublic
@@ -939,8 +938,7 @@ func (m *ScenarioManager) handleClientStream(clientID string, r io.Reader) {
 			continue
 		}
 		m.mu.Lock()
-		m.metrics.addSample(sample)
-		m.broadcastDemoSampleLocked(sample)
+		m.recordDemoSampleLocked(sample)
 		m.mu.Unlock()
 	}
 }

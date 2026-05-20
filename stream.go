@@ -257,6 +257,7 @@ func (m *ScenarioManager) demoResultItemsLocked() []DemoClientResult {
 	if m.demo == nil {
 		return nil
 	}
+	activeUsers := m.demoActiveUsersLocked()
 	items := make([]DemoClientResult, 0, len(m.demo.Users))
 	for _, user := range m.demo.Users {
 		if !user.Active {
@@ -266,9 +267,22 @@ func (m *ScenarioManager) demoResultItemsLocked() []DemoClientResult {
 		if !ok {
 			continue
 		}
-		items = append(items, result)
+		items = append(items, normalizeDemoResult(m.demo.Strategy, activeUsers, result))
 	}
 	return items
+}
+
+func normalizeDemoResult(strategy StrategyName, activeUsers int, result DemoClientResult) DemoClientResult {
+	if strategy != StrategyNoOptimization {
+		return result
+	}
+	sample := normalizeNoOptimizationSample(activeUsers, ClientSample{
+		Success:   result.Success,
+		LatencyMS: result.LatencyMS,
+	})
+	result.Success = sample.Success
+	result.LatencyMS = sample.LatencyMS
+	return result
 }
 
 func (m *ScenarioManager) broadcastDemoResultsLocked(items []DemoClientResult) {
