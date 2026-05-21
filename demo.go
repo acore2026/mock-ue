@@ -20,11 +20,12 @@ const (
 	demoNoOptimizationGuaranteedUsers = 20
 	demoStandardGBRGuaranteedUsers    = 20
 	demoDynamicQoSGuaranteedUsers     = demoPlannedUsers
+	demoStandardGBRPublicHealthyUsers = demoPlannedUsers - demoStandardGBRGuaranteedUsers
 
-	demoNoOptimizationRatePerUEMbps = 0.150
+	demoNoOptimizationRatePerUEMbps = 0.190
 	demoStandardGBRRatePerUEMbps    = 12.0 / demoStandardGBRGuaranteedUsers
 	demoDynamicQoSRatePerUEMbps     = 0.318
-	demoStandardGBRPublicRateMbps   = 2.00
+	demoStandardGBRPublicRateMbps   = 3.25
 	demoDynamicQoSPublicRateMbps    = 0.10
 	demoNoOptimizationRateMbps      = demoNoOptimizationRatePerUEMbps * demoNoOptimizationGuaranteedUsers
 	demoStandardGBRRateMbps         = demoStandardGBRRatePerUEMbps * demoStandardGBRGuaranteedUsers
@@ -544,6 +545,14 @@ func (m *ScenarioManager) demoStateLocked() DemoStateResponse {
 						Success:   true,
 						LatencyMS: user.LastLatencyMS,
 					}).LatencyMS
+				} else if m.demo.Strategy == StrategyStandardGBR && client.Profile == ProfilePublic {
+					user.LastLatencyMS = normalizeStandardGBRPublicSample(activeUsers, ClientSample{
+						ClientID:  user.ClientID,
+						Profile:   client.Profile,
+						Success:   true,
+						LatencyMS: user.LastLatencyMS,
+						Attempt:   client.Attempts,
+					}).LatencyMS
 				}
 				user.Status = classifyDemoUserStatus(user.LastLatencyMS)
 			case user.Uploading:
@@ -616,7 +625,7 @@ func classifyDemoClientStatus(strategy StrategyName, activeUsers int, client Cli
 	switch {
 	case client.Attempts == 0:
 		return "idle"
-	case strategy == StrategyNoOptimization:
+	case strategy == StrategyNoOptimization || (strategy == StrategyStandardGBR && client.Profile == ProfilePublic):
 		return classifyLatency(normalizeDemoClientLatency(strategy, activeUsers, client))
 	case !client.LastSuccess:
 		return outcomeFailed
@@ -626,14 +635,25 @@ func classifyDemoClientStatus(strategy StrategyName, activeUsers int, client Cli
 }
 
 func normalizeDemoClientLatency(strategy StrategyName, activeUsers int, client ClientReport) float64 {
-	if strategy != StrategyNoOptimization || client.Attempts == 0 {
+	if client.Attempts == 0 {
 		return client.LastLatencyMS
 	}
-	return normalizeNoOptimizationSample(activeUsers, ClientSample{
+	sample := ClientSample{
+		ClientID:  client.ClientID,
+		Profile:   client.Profile,
 		Success:   client.LastSuccess,
 		LatencyMS: client.LastLatencyMS,
 		Error:     client.LastError,
-	}).LatencyMS
+		Attempt:   client.Attempts,
+	}
+	switch strategy {
+	case StrategyNoOptimization:
+		return normalizeNoOptimizationSample(activeUsers, sample).LatencyMS
+	case StrategyStandardGBR:
+		return normalizeStandardGBRPublicSample(activeUsers, sample).LatencyMS
+	default:
+		return client.LastLatencyMS
+	}
 }
 
 func classifyDemoUserStatus(latencyMS float64) DemoUserStatus {
@@ -674,10 +694,14 @@ func (m *ScenarioManager) demoActiveUsersLocked() int {
 }
 
 func normalizeDemoSample(strategy StrategyName, activeUsers int, sample ClientSample) ClientSample {
-	if strategy != StrategyNoOptimization {
+	switch strategy {
+	case StrategyNoOptimization:
+		return normalizeNoOptimizationSample(activeUsers, sample)
+	case StrategyStandardGBR:
+		return normalizeStandardGBRPublicSample(activeUsers, sample)
+	default:
 		return sample
 	}
-	return normalizeNoOptimizationSample(activeUsers, sample)
 }
 
 func normalizeNoOptimizationSample(activeUsers int, sample ClientSample) ClientSample {
@@ -698,11 +722,12 @@ func normalizeNoOptimizationSample(activeUsers int, sample ClientSample) ClientS
 
 	floor := noOptimizationContentionFloor(activeUsers)
 	if latencyMS < floor {
-		latencyMS = floor
+		latencyMS = floor + demoLatencyJitterMS(sample.ClientID, sample.Attempt, 24)
 	}
-	if latencyMS > 820 {
-		latencyMS = 820
+	if latencyMS > 500 {
+		latencyMS = 470 + demoLatencyJitterMS(sample.ClientID, sample.Attempt, 24)
 	}
+	latencyMS = clampDemoLatency(latencyMS, 300, 500)
 	sample.Success = true
 	sample.LatencyMS = latencyMS
 	sample.Error = ""
@@ -714,7 +739,71 @@ func noOptimizationContentionFloor(activeUsers int) float64 {
 	if overload < 0 {
 		overload = 0
 	}
-	return 140 + float64(overload)*12
+	return 300 + float64(overload)*4
+}
+
+func normalizeStandardGBRPublicSample(activeUsers int, sample ClientSample) ClientSample {
+	if sample.Profile != ProfilePublic {
+		return sample
+	}
+
+	latencyMS := sample.LatencyMS
+	if activeUsers <= demoStandardGBRPublicHealthyUsers {
+		sample.Success = true
+		if latencyMS <= 0 || latencyMS > 140 {
+			latencyMS = 140
+		}
+		sample.LatencyMS = latencyMS
+		sample.Error = ""
+		return sample
+	}
+
+	if latencyMS <= 0 || !sample.Success {
+		latencyMS = 470 + demoLatencyJitterMS(sample.ClientID, sample.Attempt, 24)
+	}
+
+	floor := standardGBRPublicContentionFloor(activeUsers)
+	if latencyMS < floor {
+		latencyMS = floor + demoLatencyJitterMS(sample.ClientID, sample.Attempt, 24)
+	}
+	if latencyMS > 500 {
+		latencyMS = 470 + demoLatencyJitterMS(sample.ClientID, sample.Attempt, 24)
+	}
+
+	sample.Success = true
+	sample.LatencyMS = clampDemoLatency(latencyMS, 300, 500)
+	sample.Error = ""
+	return sample
+}
+
+func standardGBRPublicContentionFloor(activeUsers int) float64 {
+	overload := activeUsers - demoStandardGBRPublicHealthyUsers
+	if overload < 1 {
+		overload = 1
+	}
+	return 300 + float64(overload-1)*5
+}
+
+func demoLatencyJitterMS(clientID string, attempt int, amplitude int) float64 {
+	if amplitude <= 0 {
+		return 0
+	}
+	span := amplitude*2 + 1
+	seed := attempt * 17
+	for _, ch := range clientID {
+		seed += int(ch)
+	}
+	return float64(seed%span - amplitude)
+}
+
+func clampDemoLatency(value, min, max float64) float64 {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
 }
 
 func shouldRecordDemoSample(strategy StrategyName, sample ClientSample) bool {

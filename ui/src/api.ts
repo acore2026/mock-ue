@@ -57,13 +57,51 @@ export function subscribeDemoStream(
   onStatus: (status: DemoStreamStatus) => void,
 ) {
   let socket: WebSocket | null = null
+  let events: EventSource | null = null
   let stopped = false
   let reconnectTimer: number | null = null
   let reconnectDelay = 500
+  let opened = false
+
+  function emitEvent(data: string) {
+    try {
+      onEvent(JSON.parse(data) as DemoStreamEvent)
+    } catch {
+      // Ignore malformed stream frames; the next snapshot will recover state.
+    }
+  }
 
   function streamURL() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     return `${protocol}//${window.location.host}/v1/demo/stream`
+  }
+
+  function eventsURL() {
+    return '/v1/demo/events'
+  }
+
+  function connectSSE() {
+    if (stopped || events) {
+      return
+    }
+    onStatus(opened ? 'reconnecting' : 'connecting')
+    events = new EventSource(eventsURL())
+
+    events.onopen = () => {
+      opened = true
+      reconnectDelay = 500
+      onStatus('connected')
+    }
+
+    events.onmessage = (message) => {
+      emitEvent(message.data)
+    }
+
+    events.onerror = () => {
+      if (!stopped) {
+        onStatus(opened ? 'reconnecting' : 'connecting')
+      }
+    }
   }
 
   function connect() {
@@ -71,25 +109,31 @@ export function subscribeDemoStream(
       return
     }
     onStatus(reconnectDelay === 500 ? 'connecting' : 'reconnecting')
-    socket = new WebSocket(streamURL())
+    try {
+      socket = new WebSocket(streamURL())
+    } catch {
+      connectSSE()
+      return
+    }
 
     socket.onopen = () => {
+      opened = true
       reconnectDelay = 500
       onStatus('connected')
     }
 
     socket.onmessage = (message) => {
-      try {
-        onEvent(JSON.parse(message.data) as DemoStreamEvent)
-      } catch {
-        // Ignore malformed stream frames; the next snapshot will recover state.
-      }
+      emitEvent(message.data)
     }
 
     socket.onclose = () => {
       socket = null
       if (stopped) {
         onStatus('closed')
+        return
+      }
+      if (!opened) {
+        connectSSE()
         return
       }
       onStatus('reconnecting')
@@ -110,5 +154,6 @@ export function subscribeDemoStream(
       window.clearTimeout(reconnectTimer)
     }
     socket?.close()
+    events?.close()
   }
 }

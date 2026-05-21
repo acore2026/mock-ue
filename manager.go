@@ -197,6 +197,7 @@ func (m *ScenarioManager) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/demo/run/stop", m.handleDemoRunStop)
 	mux.HandleFunc("/v1/demo/run/reset", m.handleDemoRunReset)
 	mux.HandleFunc("/v1/demo/stream", m.handleDemoStream)
+	mux.HandleFunc("/v1/demo/events", m.handleDemoEvents)
 	mux.HandleFunc("/v1/clients", m.handleClients)
 	mux.HandleFunc("/v1/clients/spawn", m.handleSpawnClients)
 	mux.HandleFunc("/v1/scenario/setup", m.handleSetup)

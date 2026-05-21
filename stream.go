@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -120,19 +122,7 @@ func (m *ScenarioManager) handleDemoStream(w http.ResponseWriter, r *http.Reques
 	defer m.stream.unsubscribe(ch)
 
 	m.mu.Lock()
-	if m.demo != nil {
-		ch <- DemoStreamEvent{
-			Type:  demoStreamSnapshot,
-			At:    time.Now().UTC(),
-			State: ptrTo(m.demoStateLocked()),
-		}
-	} else {
-		ch <- DemoStreamEvent{
-			Type:    demoStreamError,
-			At:      time.Now().UTC(),
-			Message: "missing_demo_session",
-		}
-	}
+	ch <- m.initialDemoStreamEventLocked()
 	m.mu.Unlock()
 
 	done := make(chan struct{})
@@ -165,6 +155,83 @@ func (m *ScenarioManager) handleDemoStream(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
+}
+
+func (m *ScenarioManager) handleDemoEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	ch := m.stream.subscribe()
+	defer m.stream.unsubscribe(ch)
+
+	m.mu.Lock()
+	initial := m.initialDemoStreamEventLocked()
+	m.mu.Unlock()
+	if err := writeSSEEvent(w, initial); err != nil {
+		return
+	}
+	flusher.Flush()
+
+	heartbeat := time.NewTicker(5 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case event, ok := <-ch:
+			if !ok {
+				return
+			}
+			if err := writeSSEEvent(w, event); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-heartbeat.C:
+			if err := writeSSEEvent(w, DemoStreamEvent{Type: demoStreamHeartbeat, At: time.Now().UTC()}); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+func (m *ScenarioManager) initialDemoStreamEventLocked() DemoStreamEvent {
+	if m.demo != nil {
+		return DemoStreamEvent{
+			Type:  demoStreamSnapshot,
+			At:    time.Now().UTC(),
+			State: ptrTo(m.demoStateLocked()),
+		}
+	}
+
+	return DemoStreamEvent{
+		Type:    demoStreamError,
+		At:      time.Now().UTC(),
+		Message: "missing_demo_session",
+	}
+}
+
+func writeSSEEvent(w http.ResponseWriter, event DemoStreamEvent) error {
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(w, "data: %s\n\n", payload)
+	return err
 }
 
 func (m *ScenarioManager) broadcastDemoSnapshotLocked() {

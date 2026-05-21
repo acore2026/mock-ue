@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -180,6 +181,45 @@ func TestHandleDemoStateMissingSession(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestHandleDemoEventsInitialSnapshot(t *testing.T) {
+	mgr := newScenarioManager("/tmp/mock-ue")
+	session := newDemoSession(StrategyDynamicQoS)
+	mgr.demo = &session
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodGet, "/v1/demo/events", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	mgr.handleDemoEvents(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("content-type = %q, want text/event-stream", got)
+	}
+	body := rec.Body.String()
+	if !strings.HasPrefix(body, "data: ") {
+		t.Fatalf("body = %q, want SSE data frame", body)
+	}
+	if !strings.Contains(body, `"type":"snapshot"`) {
+		t.Fatalf("body = %q, want snapshot event", body)
+	}
+}
+
+func TestHandleDemoEventsRequiresGet(t *testing.T) {
+	mgr := newScenarioManager("/tmp/mock-ue")
+	req := httptest.NewRequest(http.MethodPost, "/v1/demo/events", nil)
+	rec := httptest.NewRecorder()
+
+	mgr.handleDemoEvents(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
 	}
 }
 
@@ -383,33 +423,107 @@ func TestNormalizeNoOptimizationSampleKeepsFirstTwentyHealthy(t *testing.T) {
 
 func TestNormalizeNoOptimizationSampleAppliesContentionAfterTwenty(t *testing.T) {
 	sample := normalizeNoOptimizationSample(50, ClientSample{
+		ClientID:  "mockue-cli-50",
 		Success:   true,
 		LatencyMS: 80,
+		Attempt:   3,
 	})
 
 	if !sample.Success {
 		t.Fatalf("success = false, want true")
 	}
-	if sample.LatencyMS <= 300 || sample.LatencyMS >= 900 {
-		t.Fatalf("latency = %v, want critical but below timeout wall", sample.LatencyMS)
+	if sample.LatencyMS < 300 || sample.LatencyMS > 500 {
+		t.Fatalf("latency = %v, want bounded 300-500ms contention", sample.LatencyMS)
 	}
 }
 
 func TestNormalizeNoOptimizationSampleConvertsTimeoutWallToCriticalLatency(t *testing.T) {
 	sample := normalizeNoOptimizationSample(50, ClientSample{
+		ClientID:  "mockue-cli-50",
 		Success:   false,
 		Error:     "timeout",
 		LatencyMS: 900,
+		Attempt:   3,
 	})
 
 	if !sample.Success {
 		t.Fatalf("success = false, want converted critical latency")
 	}
-	if sample.LatencyMS <= 300 || sample.LatencyMS >= 900 {
-		t.Fatalf("latency = %v, want critical but below timeout wall", sample.LatencyMS)
+	if sample.LatencyMS < 300 || sample.LatencyMS > 500 {
+		t.Fatalf("latency = %v, want bounded 300-500ms contention", sample.LatencyMS)
 	}
 	if sample.Error != "" {
 		t.Fatalf("error = %q, want cleared", sample.Error)
+	}
+}
+
+func TestNormalizeStandardGBRPublicSampleBoundsNonProtectedLatency(t *testing.T) {
+	sample := normalizeStandardGBRPublicSample(50, ClientSample{
+		ClientID:  "mockue-cli-01",
+		Profile:   ProfilePublic,
+		Success:   false,
+		Error:     "timeout",
+		LatencyMS: 900,
+		Attempt:   7,
+	})
+
+	if !sample.Success {
+		t.Fatalf("success = false, want converted bounded public latency")
+	}
+	if sample.LatencyMS < 300 || sample.LatencyMS > 500 {
+		t.Fatalf("latency = %v, want bounded 300-500ms public latency", sample.LatencyMS)
+	}
+	if sample.Error != "" {
+		t.Fatalf("error = %q, want cleared", sample.Error)
+	}
+}
+
+func TestNormalizeStandardGBRPublicSampleKeepsPublicHealthyBeforeFinalTwenty(t *testing.T) {
+	sample := normalizeStandardGBRPublicSample(demoStandardGBRPublicHealthyUsers, ClientSample{
+		ClientID:  "mockue-cli-01",
+		Profile:   ProfilePublic,
+		Success:   false,
+		Error:     "timeout",
+		LatencyMS: 900,
+		Attempt:   7,
+	})
+
+	if !sample.Success {
+		t.Fatalf("success = false, want converted healthy public latency")
+	}
+	if sample.LatencyMS > 150 {
+		t.Fatalf("latency = %v, want healthy latency before final 20 UEs", sample.LatencyMS)
+	}
+	if sample.Error != "" {
+		t.Fatalf("error = %q, want cleared", sample.Error)
+	}
+}
+
+func TestNormalizeStandardGBRPublicSampleDegradesWhenFinalTwentyStart(t *testing.T) {
+	sample := normalizeStandardGBRPublicSample(demoStandardGBRPublicHealthyUsers+1, ClientSample{
+		ClientID:  "mockue-cli-01",
+		Profile:   ProfilePublic,
+		Success:   true,
+		LatencyMS: 82,
+		Attempt:   7,
+	})
+
+	if sample.LatencyMS < 300 || sample.LatencyMS > 500 {
+		t.Fatalf("latency = %v, want bounded degraded latency after final 20 UEs start", sample.LatencyMS)
+	}
+}
+
+func TestNormalizeStandardGBRPublicSampleLeavesReservedProfileAlone(t *testing.T) {
+	sample := normalizeStandardGBRPublicSample(50, ClientSample{
+		ClientID:  "mockue-cli-02",
+		Profile:   ProfileOptimized,
+		Success:   true,
+		LatencyMS: 82,
+		Attempt:   7,
+	})
+
+	if sample.LatencyMS != 82 {
+		t.Fatalf("latency = %v, want reserved profile unchanged", sample.LatencyMS)
 	}
 }
 

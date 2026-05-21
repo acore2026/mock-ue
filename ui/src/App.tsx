@@ -30,6 +30,7 @@ import {
   CartesianGrid,
   Line,
   LineChart,
+  ReferenceArea,
   Tooltip,
   XAxis,
   YAxis,
@@ -1038,6 +1039,7 @@ function ScenarioHeroCard({
         </Box>
 
         <ScenarioHeroPanels
+          key={`${state.strategy}:${state.running ? 'running' : 'idle'}`}
           baselineBandwidthMbps={state.bandwidth.public_rate_mbps}
           frequency={formatUploadFrequency(state.scenario.interval_ms)}
           intentSeed={hero.index + hero.attempts}
@@ -1088,19 +1090,22 @@ const ScenarioHeroPanels = memo(function ScenarioHeroPanels({
     <>
       <Scenario3TrafficChart
         baselineBandwidthMbps={baselineBandwidthMbps}
+        highlightPeak={dynamic}
         running={running}
         qosStarted={dynamic ? chartClock.hasRun : running}
         nowMS={chartClock.nowMS}
         cycleAnchorMS={chartClock.cycleAnchorMS}
       />
 
-      <Box className="scenario3-feature-grid">
-        <Scenario3IntentPanel
-          latencyText={latencyText}
-          targetMet={targetMet}
-          frequency={frequency}
-          sizeBytes={intentSizeBytes(intentSeed, profileClock.cycleIndex)}
-        />
+      <Box className={`scenario3-feature-grid ${dynamic ? '' : 'is-qos-only'}`}>
+        {dynamic ? (
+          <Scenario3IntentPanel
+            latencyText={latencyText}
+            targetMet={targetMet}
+            frequency={frequency}
+            sizeBytes={intentSizeBytes(intentSeed, profileClock.cycleIndex)}
+          />
+        ) : null}
         <ScenarioQoSPanel
           active={dynamic ? profileClock.qosActive : false}
           dynamic={dynamic}
@@ -1222,12 +1227,14 @@ function ScenarioQoSPanel({
 
 function Scenario3TrafficChart({
   baselineBandwidthMbps,
+  highlightPeak,
   running,
   qosStarted,
   nowMS,
   cycleAnchorMS,
 }: {
   baselineBandwidthMbps: number
+  highlightPeak: boolean
   running: boolean
   qosStarted: boolean
   nowMS: number
@@ -1235,14 +1242,16 @@ function Scenario3TrafficChart({
 }) {
   const baselineBandwidth = baselineUploadBandwidth(baselineBandwidthMbps)
   const standby = !running || !qosStarted
-  const series = useMemo(() => seedBandwidthSeries(nowMS, baselineBandwidth, qosStarted, cycleAnchorMS), [baselineBandwidth, cycleAnchorMS, nowMS, qosStarted])
+  const series = useMemo(() => liveBandwidthSeries(nowMS, baselineBandwidth, !standby, cycleAnchorMS), [baselineBandwidth, cycleAnchorMS, nowMS, standby])
+  const hasSamples = series.length >= 2
   const latestWindow = useMemo(() => bandwidthWindowStats(series, baselineBandwidth), [baselineBandwidth, series])
+  const peakColumns = useMemo(() => bandwidthPeakColumns(series, cycleAnchorMS), [cycleAnchorMS, series])
   const burstActive = !standby && latestWindow.ulPeak > 6
 
-  if (standby) {
+  if (standby || !hasSamples) {
     return (
       <div className="scenario3-hero-graph is-standby" aria-label="Hero UE uplink and downlink bandwidth standby">
-        <span className="scenario3-chart-standby">Bandwidth standby</span>
+        <span className="scenario3-chart-standby">{standby ? 'Bandwidth standby' : 'Collecting bandwidth'}</span>
         <span className="scenario3-bandwidth-tag">
           <strong>UL --</strong>
           <em>DL --</em>
@@ -1261,6 +1270,19 @@ function Scenario3TrafficChart({
               <XAxis dataKey="timestamp" type="number" domain={['dataMin', 'dataMax']} hide />
               <YAxis yAxisId="ul" domain={[0, 10]} hide />
               <YAxis yAxisId="dl" domain={[0, 2]} orientation="right" hide />
+              {highlightPeak
+                ? peakColumns.map((column) => (
+                  <ReferenceArea
+                    key={`${column.x1}-${column.x2}`}
+                    yAxisId="ul"
+                    x1={column.x1}
+                    x2={column.x2}
+                    fill="rgba(109, 40, 217, 0.3)"
+                    stroke="none"
+                    ifOverflow="hidden"
+                  />
+                ))
+                : null}
               <Line yAxisId="dl" type="monotone" dataKey="dl" stroke="#0f766e" strokeWidth={1.7} strokeDasharray="4 5" dot={false} isAnimationActive={false} />
               <Line yAxisId="ul" type="monotone" dataKey="ul" stroke="#2563eb" strokeWidth={2.6} dot={false} isAnimationActive={false} />
             </LineChart>
@@ -1699,7 +1721,7 @@ function heroProfileForStrategy(strategy: StrategyName) {
         gbr: 'N/A',
         heading: 'Public',
         latencyClass: '6QI 9 / PDB 300 ms',
-        qosName: 'Public treatment',
+        qosName: 'Baseline',
         scheduling: 'Baseline',
         state: 'Baseline',
       }
@@ -1765,26 +1787,59 @@ const UPLOAD_DURATION_MS = 220
 const DL_RESPONSE_DELAY_MS = 140
 const DL_RESPONSE_DURATION_MS = 280
 
-function seedBandwidthSeries(nowMS: number, baselineMbps: number, running: boolean, cycleAnchorMS: number) {
-  return Array.from({ length: BANDWIDTH_SAMPLE_COUNT }, (_, index) => {
-    const timestamp = nowMS - (BANDWIDTH_SAMPLE_COUNT - 1 - index) * BANDWIDTH_SAMPLE_MS
-    return makeBandwidthSample(timestamp, baselineMbps, running, cycleAnchorMS)
-  })
-}
-
 function baselineBandwidthSample(baselineMbps: number): BandwidthSample {
   return { timestamp: 0, ul: Number(baselineMbps.toFixed(2)), dl: 0.3 }
 }
 
+function liveBandwidthSeries(nowMS: number, baselineMbps: number, running: boolean, cycleAnchorMS: number) {
+  if (!running) {
+    return []
+  }
+
+  const elapsedMS = Math.max(0, nowMS - cycleAnchorMS)
+  const availableSamples = Math.floor(elapsedMS / BANDWIDTH_SAMPLE_MS) + 1
+  const sampleCount = Math.min(BANDWIDTH_SAMPLE_COUNT, availableSamples)
+  const firstSampleIndex = availableSamples - sampleCount
+
+  return Array.from({ length: sampleCount }, (_, index) => {
+    const timestamp = cycleAnchorMS + (firstSampleIndex + index) * BANDWIDTH_SAMPLE_MS
+    return makeBandwidthSample(timestamp, baselineMbps, true, cycleAnchorMS)
+  })
+}
+
 function bandwidthWindowStats(series: BandwidthSample[], baselineMbps: number) {
   const fallback = baselineBandwidthSample(baselineMbps)
-  const windowSamples = series.slice(-Math.max(1, Math.ceil(BANDWIDTH_UPDATE_MS / BANDWIDTH_SAMPLE_MS)))
+  const windowSamples = series.slice(-1)
   const samples = windowSamples.length > 0 ? windowSamples : [fallback]
   return {
     ulPeak: Math.max(...samples.map((sample) => sample.ul)),
     dlPeak: Math.max(...samples.map((sample) => sample.dl)),
     endTimestamp: samples[samples.length - 1]?.timestamp ?? fallback.timestamp,
   }
+}
+
+function bandwidthPeakColumns(series: BandwidthSample[], cycleAnchorMS: number) {
+  if (series.length < 2) {
+    return []
+  }
+
+  const firstTimestamp = series[0].timestamp
+  const lastTimestamp = series[series.length - 1].timestamp
+  const halfDuration = UPLOAD_DURATION_MS / 2
+  const firstCycle = Math.floor((firstTimestamp - cycleAnchorMS - UPLOAD_PEAK_OFFSET_MS - halfDuration) / QOS_CYCLE_MS) - 1
+  const lastCycle = Math.ceil((lastTimestamp - cycleAnchorMS - UPLOAD_PEAK_OFFSET_MS + halfDuration) / QOS_CYCLE_MS) + 1
+  const columns: Array<{ x1: number; x2: number }> = []
+
+  for (let cycle = firstCycle; cycle <= lastCycle; cycle++) {
+    const peakCenter = cycleAnchorMS + cycle * QOS_CYCLE_MS + UPLOAD_PEAK_OFFSET_MS
+    const x1 = Math.max(firstTimestamp, peakCenter - halfDuration)
+    const x2 = Math.min(lastTimestamp, peakCenter + halfDuration)
+    if (x2 > x1) {
+      columns.push({ x1, x2 })
+    }
+  }
+
+  return columns
 }
 
 function makeBandwidthSample(timestamp: number, baselineMbps: number, running: boolean, cycleAnchorMS: number): BandwidthSample {
@@ -2611,21 +2666,21 @@ function scenarioStyle(strategy: StrategyName) {
         tone: 'blue' as const,
         short: 'Static reservation',
         icon: <Shield size={16} />,
-        expectation: 'Guarantees 20 UEs; later UEs compete.',
+        expectation: 'Static GBR reservation protects selected flows while non-GBR traffic remains best effort.',
       }
     case 'dynamic_qos':
       return {
         tone: 'purple' as const,
         short: 'Temporary grants',
         icon: <Sparkles size={16} />,
-        expectation: 'Guarantees all planned UEs with temporary grants.',
+        expectation: 'Intent-assisted QoS grants low-latency treatment only during real-time upload bursts.',
       }
     default:
       return {
         tone: 'orange' as const,
         short: 'All public',
         icon: <Activity size={16} />,
-        expectation: 'Guarantees 20 UEs, then all public traffic degrades.',
+        expectation: 'Best-effort baseline keeps all application traffic on public QoS without prioritization.',
       }
   }
 }
