@@ -738,7 +738,7 @@ func elapsedMS(start, now time.Time) float64 {
 func defaultDemoTreatment(strategy StrategyName, index int) DemoTreatment {
 	switch strategy {
 	case StrategyStandardGBR:
-		if index <= demoStandardGBRGuaranteedUsers {
+		if isDemoStandardGBRReservedUser(index) {
 			return DemoTreatmentReserved
 		}
 		return DemoTreatmentPublic
@@ -753,7 +753,17 @@ func demoProfileForUser(strategy StrategyName, index int) ProfileName {
 	if strategy == StrategyDynamicQoS {
 		return ProfileOptimized
 	}
+	if strategy == StrategyStandardGBR {
+		if isDemoStandardGBRReservedUser(index) {
+			return ProfileOptimized
+		}
+		return ProfilePublic
+	}
 	return strategyProfile(strategy, index-1)
+}
+
+func isDemoStandardGBRReservedUser(index int) bool {
+	return index > 1 && index <= demoStandardGBRGuaranteedUsers+1
 }
 
 func demoEffectiveTreatment(strategy StrategyName, current DemoTreatment, profile ProfileName) DemoTreatment {
@@ -774,7 +784,7 @@ func demoEffectiveTreatment(strategy StrategyName, current DemoTreatment, profil
 func demoUploadAssignment(strategy StrategyName, index int, uploading bool) (ProfileName, DemoTreatment) {
 	switch strategy {
 	case StrategyStandardGBR:
-		if index <= demoStandardGBRGuaranteedUsers {
+		if isDemoStandardGBRReservedUser(index) {
 			return ProfileOptimized, DemoTreatmentReserved
 		}
 		return ProfilePublic, DemoTreatmentPublic

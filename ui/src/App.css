@@ -398,15 +398,15 @@
 
 .empty-chart {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 132px;
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
   height: 100%;
   min-height: 0;
 }
 
 .line-chart-wrap,
 .area-chart-wrap,
-.donut-chart-wrap {
+.outcome-heatmap {
   position: relative;
   min-width: 0;
   min-height: 0;
@@ -590,20 +590,6 @@
   height: 118px;
 }
 
-.donut-chart-wrap {
-  display: grid;
-  place-items: center;
-  width: 82px;
-  height: 82px;
-}
-
-.donut-chart-wrap > span {
-  position: absolute;
-  color: var(--text);
-  font-size: 0.86rem;
-  font-weight: 620;
-}
-
 .chart-empty-label {
   display: grid;
   height: 100%;
@@ -615,32 +601,6 @@
   font-size: 0.76rem;
   font-weight: 600;
   text-align: center;
-}
-
-.threshold-stack {
-  display: grid;
-  grid-template-rows: 7fr 1.5fr 1.5fr;
-  border-left: 1px solid var(--line);
-  font-size: 0.66rem;
-}
-
-.threshold-stack span {
-  display: grid;
-  place-items: center;
-  border-bottom: 1px dashed var(--line);
-}
-
-.threshold-stack span:first-child {
-  color: var(--critical);
-}
-
-.threshold-stack span:nth-child(2) {
-  color: var(--orange);
-}
-
-.threshold-stack span:last-child {
-  color: var(--green);
-  border-bottom: 0;
 }
 
 .spark-bars {
@@ -671,47 +631,108 @@
 
 .outcome-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 86px 112px;
+  grid-template-columns: minmax(0, 1fr) 154px 132px;
   align-items: center;
   gap: 10px;
 }
 
+.outcome-heatmap {
+  display: grid;
+  place-items: stretch;
+  width: 154px;
+  height: 104px;
+  padding: 5px;
+  border: 1px solid rgba(220, 226, 236, 0.86);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(248, 250, 252, 0.72)),
+    #fff;
+}
+
+.outcome-heatmap.is-empty {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 650;
+}
+
+.outcome-heatmap-canvas {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
 .outcome-list {
   display: grid;
-  gap: 6px;
+  gap: 7px;
 }
 
 .outcome-row {
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: 4px minmax(0, 1fr) auto;
+  align-items: center;
+  justify-content: stretch;
   gap: 8px;
+  min-height: 28px;
+  padding: 6px 8px;
+  border: 1px solid rgba(220, 226, 236, 0.78);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
 }
 
 .outcome-row::before {
-  width: 8px;
-  height: 8px;
+  width: 4px;
+  height: 18px;
   border-radius: 999px;
   content: "";
 }
 
+.outcome-row span {
+  flex: 1;
+  min-width: 0;
+  color: #475467;
+  font-size: 0.7rem;
+}
+
 .outcome-row.tone-green::before {
-  background: var(--green);
+  background: #22a34a;
+}
+
+.outcome-row.tone-green {
+  border-color: rgba(34, 163, 74, 0.2);
+  background: rgba(236, 253, 243, 0.72);
 }
 
 .outcome-row.tone-orange::before {
   background: var(--orange);
 }
 
-.outcome-row.tone-critical::before {
-  background: var(--critical);
+.outcome-row.tone-yellow::before {
+  background: #f59e0b;
 }
 
+.outcome-row.tone-yellow {
+  border-color: rgba(245, 158, 11, 0.24);
+  background: rgba(255, 251, 235, 0.78);
+}
+
+.outcome-row.tone-critical::before,
 .outcome-row.tone-red::before {
-  background: var(--red);
+  background: #ef4444;
+}
+
+.outcome-row.tone-critical,
+.outcome-row.tone-red {
+  border-color: rgba(239, 68, 68, 0.22);
+  background: rgba(254, 242, 242, 0.78);
 }
 
 .outcome-row strong {
   color: var(--text);
-  font-size: 0.72rem;
+  font-size: 0.76rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .allocation-bar {
@@ -889,7 +910,7 @@
 .scenario3-hero-card {
   position: relative;
   min-height: 0;
-  overflow: hidden;
+  overflow: visible;
   border-color: rgba(124, 58, 237, 0.2) !important;
   border-radius: 12px;
   background:
@@ -1556,18 +1577,21 @@
 
 .scenario3-latest-image {
   position: relative;
-  min-height: 156px;
-  overflow: hidden;
+  min-height: 0;
+  overflow: visible;
   border: 1px solid rgba(220, 226, 236, 0.82);
   border-radius: 8px;
   background: #0f172a;
+  aspect-ratio: 16 / 9;
 }
 
 .scenario3-latest-image img {
   display: block;
   width: 100%;
-  height: 156px;
+  height: 100%;
+  min-height: 0;
   object-fit: contain;
+  border-radius: inherit;
 }
 
 .scenario3-image-caption,
@@ -1777,7 +1801,7 @@
   border: 1px solid #d7e0ed;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.96);
-  box-shadow: 0 3px 9px rgba(15, 23, 42, 0.025);
+  box-shadow: 0 7px 16px rgba(15, 23, 42, 0.055);
 }
 
 .ue-card.status-good {
@@ -2008,20 +2032,23 @@
 }
 
 .latency-bars-chart {
-  display: grid;
-  grid-auto-flow: column;
-  align-items: end;
-  gap: 2px;
+  display: block;
   contain: layout paint style;
   color: #94a3b8;
 }
 
-.latency-bars-chart span {
-  display: block;
-  min-height: 1px;
-  border-radius: 2px 2px 1px 1px;
+.latency-bars-chart rect {
   background: currentColor;
-  opacity: 0.58;
+  fill: currentColor;
+  opacity: 0.82;
+}
+
+.latency-bars-target {
+  stroke: currentColor;
+  stroke-dasharray: 2 3;
+  stroke-linecap: round;
+  stroke-width: 0.8;
+  opacity: 0.24;
 }
 
 .latency-bars-chart.is-standby {
@@ -2032,8 +2059,8 @@
   align-self: end;
   display: block;
   width: 100%;
-  height: 15px;
-  min-height: 15px;
+  height: 18px;
+  min-height: 18px;
   max-width: 100%;
   overflow: hidden;
 }
@@ -2047,7 +2074,7 @@
 
 .crowd-latency-bars.tone-healthy,
 .hero-latency-bars.tone-healthy {
-  color: #86d993;
+  color: #5fc879;
 }
 
 .crowd-latency-bars.tone-degraded,
@@ -2238,6 +2265,10 @@
   color: var(--red);
 }
 
+.metric-inline.tone-orange strong {
+  color: var(--orange);
+}
+
 .metric-inline.tone-critical strong {
   color: var(--critical);
 }
@@ -2398,13 +2429,14 @@
     height: 92px;
   }
 
-  .donut-chart-wrap {
-    width: 64px;
-    height: 64px;
+  .outcome-heatmap {
+    width: 96px;
+    height: 76px;
+    gap: 2px;
   }
 
   .outcome-layout {
-    grid-template-columns: minmax(0, 1fr) 68px 92px;
+    grid-template-columns: minmax(0, 1fr) 96px 92px;
     gap: 8px;
   }
 
@@ -2519,8 +2551,8 @@
     grid-template-columns: 1fr;
   }
 
-  .scenario3-latest-image img {
-    height: 150px;
+  .scenario3-latest-image {
+    aspect-ratio: 16 / 9;
   }
 
   .outcome-layout,
@@ -2528,9 +2560,6 @@
     grid-template-columns: 1fr;
   }
 
-  .threshold-stack {
-    display: none;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {

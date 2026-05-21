@@ -36,8 +36,11 @@ func TestNewDemoSession(t *testing.T) {
 	if !nearRate(session.Config.Optimized.RateMbps, demoStandardGBRRateMbps) {
 		t.Fatalf("optimized rate = %v, want %v", session.Config.Optimized.RateMbps, demoStandardGBRRateMbps)
 	}
-	if session.Users[0].Treatment != DemoTreatmentReserved {
-		t.Fatalf("first user treatment = %q, want reserved", session.Users[0].Treatment)
+	if session.Users[0].Treatment != DemoTreatmentPublic {
+		t.Fatalf("first user treatment = %q, want public", session.Users[0].Treatment)
+	}
+	if session.Users[1].Treatment != DemoTreatmentReserved {
+		t.Fatalf("second user treatment = %q, want reserved", session.Users[1].Treatment)
 	}
 	if session.Users[31].Treatment != DemoTreatmentPublic {
 		t.Fatalf("later user treatment = %q, want public", session.Users[31].Treatment)
@@ -195,9 +198,9 @@ func TestDemoStateCountsActivatedUsers(t *testing.T) {
 	now := time.Now().UTC()
 	mgr := newScenarioManager("/tmp/mock-ue")
 	session := newDemoSession(StrategyStandardGBR)
-	session.Users[0].ActivatedAt = &now
-	session.Users[0].Active = true
-	session.Users[0].Status = DemoUserStatusIdle
+	session.Users[1].ActivatedAt = &now
+	session.Users[1].Active = true
+	session.Users[1].Status = DemoUserStatusIdle
 	session.Users[30].ActivatedAt = &now
 	session.Users[30].Active = true
 	session.Users[30].Status = DemoUserStatusFailed
@@ -291,10 +294,13 @@ func TestDemoProfileForUser(t *testing.T) {
 	if got := demoProfileForUser(StrategyDynamicQoS, 1); got != ProfileOptimized {
 		t.Fatalf("dynamic profile = %q, want optimized", got)
 	}
-	if got := demoProfileForUser(StrategyStandardGBR, 1); got != ProfileOptimized {
-		t.Fatalf("standard gbr first profile = %q, want optimized", got)
+	if got := demoProfileForUser(StrategyStandardGBR, 1); got != ProfilePublic {
+		t.Fatalf("standard gbr hero profile = %q, want public", got)
 	}
-	if got := demoProfileForUser(StrategyStandardGBR, demoStandardGBRGuaranteedUsers+1); got != ProfilePublic {
+	if got := demoProfileForUser(StrategyStandardGBR, 2); got != ProfileOptimized {
+		t.Fatalf("standard gbr reserved profile = %q, want optimized", got)
+	}
+	if got := demoProfileForUser(StrategyStandardGBR, demoStandardGBRGuaranteedUsers+2); got != ProfilePublic {
 		t.Fatalf("standard gbr later profile = %q, want public", got)
 	}
 }
@@ -308,11 +314,15 @@ func TestDemoUploadAssignment(t *testing.T) {
 	if profile != ProfileOptimized || treatment != DemoTreatmentPublic {
 		t.Fatalf("dynamic idle = (%q, %q), want (optimized, public)", profile, treatment)
 	}
-	profile, treatment = demoUploadAssignment(StrategyStandardGBR, demoStandardGBRGuaranteedUsers, true)
+	profile, treatment = demoUploadAssignment(StrategyStandardGBR, 1, true)
+	if profile != ProfilePublic || treatment != DemoTreatmentPublic {
+		t.Fatalf("standard hero = (%q, %q), want (public, public)", profile, treatment)
+	}
+	profile, treatment = demoUploadAssignment(StrategyStandardGBR, 2, true)
 	if profile != ProfileOptimized || treatment != DemoTreatmentReserved {
 		t.Fatalf("standard protected = (%q, %q), want (optimized, reserved)", profile, treatment)
 	}
-	profile, treatment = demoUploadAssignment(StrategyStandardGBR, demoStandardGBRGuaranteedUsers+1, true)
+	profile, treatment = demoUploadAssignment(StrategyStandardGBR, demoStandardGBRGuaranteedUsers+2, true)
 	if profile != ProfilePublic || treatment != DemoTreatmentPublic {
 		t.Fatalf("standard non-protected = (%q, %q), want (public, public)", profile, treatment)
 	}

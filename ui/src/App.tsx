@@ -28,11 +28,8 @@ import {
   Area,
   AreaChart,
   CartesianGrid,
-  Cell,
   Line,
   LineChart,
-  Pie,
-  PieChart,
   Tooltip,
   XAxis,
   YAxis,
@@ -48,7 +45,7 @@ const strategies: Array<{ label: string; value: StrategyName; short: string; ton
   { label: 'Dynamic QoS', value: 'dynamic_qos', short: 'Temporary grants', tone: 'purple' },
 ]
 
-const filterOptions = ['all', 'uploading', 'temporary', 'healthy', 'delayed', 'critical'] as const
+const filterOptions = ['all', 'uploading', 'temporary', 'healthy', 'delayed', 'degraded'] as const
 const sortOptions = ['latency', 'ue', 'status'] as const
 
 type PendingAction = 'mode' | 'run' | 'stop' | 'reset' | 'refresh'
@@ -74,6 +71,27 @@ type HistoryPoint = {
   latencies: number[]
 }
 type OutcomeHistoryPoint = Pick<HistoryPoint, 'active' | 'goodPct' | 'degradedPct' | 'highPct' | 'failedPct'>
+type OutcomeSummary = {
+  activeUsers: number
+  completedUsers: number
+  good: number
+  delayed: number
+  high: number
+  failed: number
+  goodPct: number
+  degradedPct: number
+  highPct: number
+  failedPct: number
+}
+type OutcomeHeatmapPoint = {
+  id: string
+  label: string
+  status: string
+  tone: string
+  value: number
+  x: number
+  y: number
+}
 type BoxPlotStats = {
   min: number
   q1: number
@@ -159,6 +177,7 @@ function App() {
         <StrategyComparison
           state={liveState.state}
           historyPoints={liveState.historyPoints}
+          resultByID={liveState.resultByID}
           pending={liveState.pending.mode}
           pendingStrategy={liveState.pendingStrategy}
           onModeSelect={liveState.switchMode}
@@ -453,7 +472,7 @@ function DashboardBody({
 }) {
   return (
     <main className="dashboard-body">
-      <AnalyticsColumn state={state} historyPoints={historyPoints} />
+      <AnalyticsColumn state={state} historyPoints={historyPoints} resultByID={resultByID} />
       <DeviceBoard
         state={state}
         resultByID={resultByID}
@@ -466,20 +485,23 @@ function DashboardBody({
 function StrategyComparison({
   state,
   historyPoints,
+  resultByID,
   pending,
   pendingStrategy,
   onModeSelect,
 }: {
   state: DemoState | null
   historyPoints: HistoryPoint[]
+  resultByID: Record<string, UploadResult>
   pending: boolean
   pendingStrategy: StrategyName | null
   onModeSelect: (strategy: StrategyName) => Promise<void>
 }) {
   const activeStrategy = state?.strategy ?? null
-  const activeUsers = state?.counters.active_users ?? 0
+  const liveOutcome = useMemo(() => liveOutcomeSummary(state, resultByID), [resultByID, state])
+  const activeUsers = liveOutcome.activeUsers
   const latestPoint = historyPoints.at(-1)
-  const outcomeHistoryPoints = compactOutcomeHistory(historyPoints)
+  const outcomeHistoryPoints = useMemo(() => mergeLiveOutcomePoint(historyPoints, liveOutcome), [historyPoints, liveOutcome])
 
   return (
     <section className="strategy-comparison" aria-label="Mode selection" role="radiogroup">
@@ -494,6 +516,7 @@ function StrategyComparison({
           outcomeHistoryPoints,
           state,
           activeUsers,
+          liveOutcome,
         })
         return (
           <button
@@ -519,8 +542,8 @@ function StrategyComparison({
               <div className="comparison-metrics">
                 <MetricInline label="Healthy" value={comparison.good} tone="green" />
                 <MetricInline label="P50 Latency" value={comparison.p50} tone="purple" />
-                <MetricInline label="Critical" value={comparison.critical} tone="critical" />
-                <MetricInline label="Failed" value={comparison.failed} tone="red" />
+                <MetricInline label="Delayed" value={comparison.delayed} tone="orange" />
+                <MetricInline label="Degraded" value={comparison.degraded} tone="red" />
               </div>
             </div>
 
@@ -554,8 +577,7 @@ function StrategyOutcomeMiniChart({
             <YAxis domain={[0, 100]} hide />
             <Area type="monotone" dataKey="goodPct" stackId="outcome" stroke="none" fill="#86d993" isAnimationActive={false} />
             <Area type="monotone" dataKey="degradedPct" stackId="outcome" stroke="none" fill="#fbd38d" isAnimationActive={false} />
-            <Area type="monotone" dataKey="highPct" stackId="outcome" stroke="none" fill="#fdba74" isAnimationActive={false} />
-            <Area type="monotone" dataKey="failedPct" stackId="outcome" stroke="none" fill="#dc2626" isAnimationActive={false} />
+            <Area type="monotone" dataKey="highPct" stackId="outcome" stroke="none" fill="#fca5a5" isAnimationActive={false} />
           </AreaChart>
         )}
       </MeasuredChart>
@@ -580,23 +602,25 @@ function strategyComparisonMetrics(
     outcomeHistoryPoints: OutcomeHistoryPoint[]
     state: DemoState | null
     activeUsers: number
+    liveOutcome: OutcomeSummary
   },
 ) {
   const guide = strategyGuide(strategy)
   if (context.isActive && context.state && context.activeUsers > 0) {
+    const liveReady = context.liveOutcome.completedUsers > 0
     return {
-      good: `${goodLatencyPercent(context.state)}%`,
+      good: `${liveReady ? context.liveOutcome.goodPct : guide.good}%`,
       p50: context.latestPoint ? formatLatency(context.latestPoint.p50) : '--',
-      critical: `${criticalPercent(context.state)}%`,
-      failed: `${failedPercent(context.state)}%`,
+      delayed: `${liveReady ? context.liveOutcome.degradedPct : guide.delayed}%`,
+      degraded: `${liveReady ? context.liveOutcome.highPct : guide.degraded}%`,
       outcomeHistory: context.outcomeHistoryPoints.length ? context.outcomeHistoryPoints : guide.outcomeHistory,
     }
   }
   return {
     good: `${guide.good}%`,
     p50: `${guide.p50} ms`,
-    critical: `${guide.critical}%`,
-    failed: `${guide.failed}%`,
+    delayed: `${guide.delayed}%`,
+    degraded: `${guide.degraded}%`,
     outcomeHistory: guide.outcomeHistory,
   }
 }
@@ -607,8 +631,8 @@ function strategyGuide(strategy: StrategyName) {
       return {
         good: 60,
         p50: 145,
-        critical: 25,
-        failed: 0,
+        delayed: 15,
+        degraded: 25,
         outcomeHistory: outcomeGuide([
           [0, 100, 0, 0, 0],
           [5, 100, 0, 0, 0],
@@ -627,8 +651,8 @@ function strategyGuide(strategy: StrategyName) {
       return {
         good: 100,
         p50: 70,
-        critical: 0,
-        failed: 0,
+        delayed: 0,
+        degraded: 0,
         outcomeHistory: outcomeGuide([
           [0, 100, 0, 0, 0],
           [5, 100, 0, 0, 0],
@@ -647,8 +671,8 @@ function strategyGuide(strategy: StrategyName) {
       return {
         good: 40,
         p50: 245,
-        critical: 40,
-        failed: 0,
+        delayed: 16,
+        degraded: 60,
         outcomeHistory: outcomeGuide([
           [0, 100, 0, 0, 0],
           [5, 100, 0, 0, 0],
@@ -696,39 +720,35 @@ function latencyBarData(samples: number[], barCount: number) {
   })
 }
 
-function latencyBarHeights(samples: number[], barCount: number) {
-  return latencyBarData(samples, barCount).map((item) => {
-    if (item.latency <= 0) {
-      return 0
-    }
-    return Math.max(2, Math.round((Math.min(item.latency, 300) / 300) * 100))
-  })
+function latencyBarHeight(latency: number, chartHeight: number) {
+  if (latency <= 0) {
+    return 1
+  }
+  return Math.max(2, Math.round((Math.min(latency, LATENCY_BAR_MAX_MS) / LATENCY_BAR_MAX_MS) * chartHeight))
 }
 
 function AnalyticsColumn({
   state,
   historyPoints,
+  resultByID,
 }: {
   state: DemoState | null
   historyPoints: HistoryPoint[]
+  resultByID: Record<string, UploadResult>
 }) {
-  const good = state?.counters.good_users ?? 0
-  const delayed = state?.counters.delayed_users ?? 0
-  const high = state?.counters.high_users ?? 0
-  const failed = state?.counters.failed_users ?? 0
+  const outcome = useMemo(() => liveOutcomeSummary(state, resultByID), [resultByID, state])
+  const good = outcome.good
+  const delayed = outcome.delayed
+  const degraded = outcome.high + outcome.failed
   const treatments = state ? treatmentCounts(state.users) : { public: 0, reserved: 0, temporary: 0 }
-  const activeUsers = state?.counters.active_users ?? 0
-  const outcomeData = [
-    { name: 'Healthy', value: good, color: '#22a34a' },
-    { name: 'Degraded', value: delayed, color: '#f59e0b' },
-    { name: 'Critical', value: high, color: '#f97316' },
-    { name: 'Failed', value: failed, color: '#dc2626' },
-  ]
+  const activeUsers = outcome.activeUsers
   const treatmentTotal = treatments.public + treatments.temporary + treatments.reserved
   const treatmentPct = (value: number) => (treatmentTotal > 0 ? Math.round((value / treatmentTotal) * 100) : 0)
   const chartPoints = compactHistoryByActive(historyPoints)
-  const chartMaxUsers = Math.max(state?.users.length ?? 0, ...chartPoints.map((point) => point.active), 1)
+  const outcomeChartPoints = mergeLiveOutcomePoint(chartPoints, outcome)
+  const chartMaxUsers = Math.max(state?.users.length ?? 0, ...outcomeChartPoints.map((point) => point.active), 1)
   const chartsReady = Boolean(state?.running && chartPoints.length)
+  const outcomeChartsReady = Boolean(state?.running && outcomeChartPoints.length)
 
   return (
     <section className="analytics-column" aria-label="Simulation analytics">
@@ -749,11 +769,6 @@ function AnalyticsColumn({
                 <ChartEmpty label="Standby until live latency data arrives" />
               )}
             </div>
-            <div className="threshold-stack">
-              <span>Critical (&gt;300ms)</span>
-              <span>Degraded (150-300ms)</span>
-              <span>Healthy (&lt;=150ms)</span>
-            </div>
           </div>
         </div>
       </Panel>
@@ -761,17 +776,16 @@ function AnalyticsColumn({
       <Panel title="Upload Outcome Distribution">
         <div className="outcome-layout">
           <div className="area-chart-wrap">
-            {chartsReady ? (
+            {outcomeChartsReady ? (
               <MeasuredChart>
                 {({ width, height }) => (
-                  <AreaChart width={width} height={height} data={chartPoints} margin={{ top: 6, right: 6, bottom: 0, left: -24 }}>
+                  <AreaChart width={width} height={height} data={outcomeChartPoints} margin={{ top: 6, right: 6, bottom: 0, left: -24 }}>
                     <XAxis dataKey="active" type="number" domain={[0, chartMaxUsers]} ticks={activeAxisTicks(chartMaxUsers)} tickFormatter={formatActiveAxis} tick={{ fontSize: 10, fill: '#667085' }} tickLine={false} axisLine={false} allowDecimals={false} />
                     <YAxis domain={[0, 100]} ticks={[0, 50, 100]} tickFormatter={(value) => `${value}%`} tick={{ fontSize: 10, fill: '#667085' }} tickLine={false} axisLine={false} />
                     <Tooltip contentStyle={{ border: '1px solid #dce3ef', borderRadius: 8, fontSize: 12 }} formatter={(value, name) => [`${Number(value).toFixed(0)}%`, name]} labelFormatter={(value) => formatActiveLabel(Number(value))} />
                     <Area type="monotone" dataKey="goodPct" name="Healthy" stackId="1" stroke="#22a34a" fill="#86d993" isAnimationActive={false} />
-                    <Area type="monotone" dataKey="degradedPct" name="Degraded" stackId="1" stroke="#f59e0b" fill="#fbd38d" isAnimationActive={false} />
-                    <Area type="monotone" dataKey="highPct" name="Critical" stackId="1" stroke="#f97316" fill="#fdba74" isAnimationActive={false} />
-                    <Area type="monotone" dataKey="failedPct" name="Failed" stackId="1" stroke="#dc2626" fill="#fca5a5" isAnimationActive={false} />
+                    <Area type="monotone" dataKey="degradedPct" name="Delayed" stackId="1" stroke="#f59e0b" fill="#fbd38d" isAnimationActive={false} />
+                    <Area type="monotone" dataKey="highPct" name="Degraded" stackId="1" stroke="#ef4444" fill="#fca5a5" isAnimationActive={false} />
                   </AreaChart>
                 )}
               </MeasuredChart>
@@ -779,35 +793,11 @@ function AnalyticsColumn({
               <ChartEmpty label="Standby until live outcome data arrives" />
             )}
           </div>
-          <div className="donut-chart-wrap">
-            {activeUsers > 0 ? (
-              <>
-                <MeasuredChart>
-                  {({ width, height }) => {
-                    const outerRadius = Math.max(22, Math.min(width, height) / 2 - 4)
-                    const innerRadius = Math.max(12, outerRadius - 14)
-                    return (
-                      <PieChart width={width} height={height}>
-                        <Pie data={outcomeData} dataKey="value" nameKey="name" innerRadius={innerRadius} outerRadius={outerRadius} paddingAngle={1} stroke="none" isAnimationActive={false}>
-                          {outcomeData.map((entry) => (
-                            <Cell key={entry.name} fill={entry.color} />
-                          ))}
-                        </Pie>
-                      </PieChart>
-                    )
-                  }}
-                </MeasuredChart>
-                <span>{state ? goodLatencyPercent(state) : 0}%</span>
-              </>
-            ) : (
-              <span>--</span>
-            )}
-          </div>
+          <OutcomeHeatmap state={state} resultByID={resultByID} />
           <div className="outcome-list">
             <OutcomeRow label="Healthy" value={good} tone="green" />
-            <OutcomeRow label="Degraded" value={delayed} tone="orange" />
-            <OutcomeRow label="Critical" value={high} tone="critical" />
-            <OutcomeRow label="Failed" value={failed} tone="red" />
+            <OutcomeRow label="Delayed" value={delayed} tone="yellow" />
+            <OutcomeRow label="Degraded" value={degraded} tone="red" />
           </div>
         </div>
       </Panel>
@@ -844,8 +834,8 @@ const DeviceBoard = memo(function DeviceBoard({
   const deferredResultByID = useDeferredValue(resultByID)
   const throttledLatencyHistoryByID = useThrottledValue(latencyHistoryByID, LATENCY_BARS_UPDATE_MS)
   const deferredLatencyHistoryByID = useDeferredValue(throttledLatencyHistoryByID)
-  const scenario3Hero = heroUserForScenario3(state, deferredResultByID)
-  const heroUsers = useMemo(() => (scenario3Hero ? [scenario3Hero] : []), [scenario3Hero])
+  const scenarioHero = heroUserForStrategy(state, deferredResultByID)
+  const heroUsers = useMemo(() => (scenarioHero ? [scenarioHero] : []), [scenarioHero])
   const heroIDs = useMemo(() => new Set(heroUsers.map((user) => user.client_id)), [heroUsers])
   const crowdUsers = useMemo(() => users.filter((user) => !heroIDs.has(user.client_id)), [users, heroIDs])
   const crowdCards = useMemo(
@@ -879,7 +869,7 @@ const DeviceBoard = memo(function DeviceBoard({
         {heroUsers.length ? (
           <div className="ue-hero-column" aria-label="Hero UE cards">
             {heroUsers.map((hero) => (
-              <Scenario3HeroCard
+              <ScenarioHeroCard
                 key={hero.client_id}
                 state={state}
                 hero={hero}
@@ -972,7 +962,7 @@ function areDeviceCardsEqual(previous: { card: DeviceCardView }, next: { card: D
   )
 }
 
-function Scenario3HeroCard({
+function ScenarioHeroCard({
   state,
   hero,
   latestResult,
@@ -985,15 +975,6 @@ function Scenario3HeroCard({
 }) {
   if (!state) {
     return null
-  }
-
-  if (state.strategy !== 'dynamic_qos') {
-    return (
-      <div className="scenario3-hero-empty">
-        <strong>Scenario 3 hero card is next for Dynamic QoS.</strong>
-        <span>Crowd UE tiles remain live for this mode.</span>
-      </div>
-    )
   }
 
   if (!hero) {
@@ -1011,7 +992,7 @@ function Scenario3HeroCard({
   const recognized = recognitionLabelForUser(hero)
   const latencyText = uploadDelay > 0 ? formatLatency(uploadDelay) : 'Waiting'
   const targetMet = latestResult?.success === true && uploadDelay > 0 && uploadDelay < 100
-  const grantLabel = 'Dynamic QoS'
+  const heroProfile = heroProfileForStrategy(state.strategy)
   const resultLabel = latestResult?.success ? `${recognized} recognized` : 'Waiting for result'
   const e2eDelayText = uploadDelay > 0 ? formatLatency(e2eDelayForUploadDelay(uploadDelay, hero.index + hero.attempts)) : '--'
 
@@ -1037,7 +1018,7 @@ function Scenario3HeroCard({
           </Box>
           <div className="scenario3-chip-row">
             <Chip className={`scenario3-chip tone-${outcome.tone}`} size="small" label={outcome.label} />
-            <Chip className="scenario3-chip tone-grant" size="small" icon={<Sparkles size={12} aria-hidden="true" />} label={grantLabel} />
+            <Chip className="scenario3-chip tone-grant" size="small" icon={heroProfile.dynamic ? <Sparkles size={12} aria-hidden="true" /> : undefined} label={heroProfile.chip} />
           </div>
         </div>
 
@@ -1056,12 +1037,13 @@ function Scenario3HeroCard({
           </div>
         </Box>
 
-        <Scenario3LiveHeroPanels
+        <ScenarioHeroPanels
           baselineBandwidthMbps={state.bandwidth.public_rate_mbps}
           frequency={formatUploadFrequency(state.scenario.interval_ms)}
           intentSeed={hero.index + hero.attempts}
           latencyText={latencyText}
           running={Boolean(state.running)}
+          strategy={state.strategy}
           targetMet={targetMet}
         />
 
@@ -1081,12 +1063,13 @@ function Scenario3HeroCard({
   )
 }
 
-const Scenario3LiveHeroPanels = memo(function Scenario3LiveHeroPanels({
+const ScenarioHeroPanels = memo(function ScenarioHeroPanels({
   baselineBandwidthMbps,
   frequency,
   intentSeed,
   latencyText,
   running,
+  strategy,
   targetMet,
 }: {
   baselineBandwidthMbps: number
@@ -1094,17 +1077,19 @@ const Scenario3LiveHeroPanels = memo(function Scenario3LiveHeroPanels({
   intentSeed: number
   latencyText: string
   running: boolean
+  strategy: StrategyName
   targetMet: boolean
 }) {
   const chartClock = useQosCycleClock(running, BANDWIDTH_UPDATE_MS)
   const profileClock = useQosProfileClock(running)
+  const dynamic = strategy === 'dynamic_qos'
 
   return (
     <>
       <Scenario3TrafficChart
         baselineBandwidthMbps={baselineBandwidthMbps}
         running={running}
-        qosStarted={chartClock.hasRun}
+        qosStarted={dynamic ? chartClock.hasRun : running}
         nowMS={chartClock.nowMS}
         cycleAnchorMS={chartClock.cycleAnchorMS}
       />
@@ -1116,9 +1101,11 @@ const Scenario3LiveHeroPanels = memo(function Scenario3LiveHeroPanels({
           frequency={frequency}
           sizeBytes={intentSizeBytes(intentSeed, profileClock.cycleIndex)}
         />
-        <Scenario3QoSPanel
-          active={profileClock.qosActive}
+        <ScenarioQoSPanel
+          active={dynamic ? profileClock.qosActive : false}
+          dynamic={dynamic}
           lastUpdated={formatTimeOfDay(profileClock.nowMS)}
+          strategy={strategy}
         />
       </Box>
     </>
@@ -1177,55 +1164,52 @@ function Scenario3IntentPanel({
   )
 }
 
-function Scenario3QoSPanel({
+function ScenarioQoSPanel({
   active,
+  dynamic,
   lastUpdated,
+  strategy,
 }: {
   active: boolean
+  dynamic: boolean
   lastUpdated: string
+  strategy: StrategyName
 }) {
+  const profile = heroProfileForStrategy(strategy)
   return (
     <section className={`scenario3-feature-card scenario3-qos-panel ${active ? 'is-active' : 'is-standby'}`}>
       <div className="scenario3-feature-heading">
         <span><Gauge size={13} aria-hidden="true" /> QoS Parameter</span>
-        <strong>Grant</strong>
+        <strong>{profile.heading}</strong>
       </div>
       <div className="scenario3-qos-state">
-        <Sparkles size={12} aria-hidden="true" />
-        <span>Dynamic QoS</span>
-        <strong className="scenario3-qos-switch">
-          <span className={active ? '' : 'is-visible'}>Baseline</span>
-          <span className={active ? 'is-visible' : ''}>Active</span>
-        </strong>
+        {dynamic ? <Sparkles size={12} aria-hidden="true" /> : <Gauge size={12} aria-hidden="true" />}
+        <span>{profile.qosName}</span>
+        {dynamic ? (
+          <strong className="scenario3-qos-switch">
+            <span className={active ? '' : 'is-visible'}>Baseline</span>
+            <span className={active ? 'is-visible' : ''}>Active</span>
+          </strong>
+        ) : (
+          <strong>{profile.state}</strong>
+        )}
       </div>
       <dl className="scenario3-feature-metrics scenario3-qos-metrics">
         <div>
           <dt>GBR / MBR</dt>
-          <dd className="scenario3-qos-switch">
-            <span className={active ? '' : 'is-visible'}>N/A</span>
-            <span className={active ? 'is-visible' : ''}>2 Mbps / 5 Mbps</span>
-          </dd>
+          <dd>{dynamic ? (active ? '2 Mbps / 5 Mbps' : 'N/A') : profile.gbr}</dd>
         </div>
         <div>
           <dt>Latency Class</dt>
-          <dd className="scenario3-qos-switch">
-            <span className={active ? '' : 'is-visible'}>6QI 9 / PDB 300 ms</span>
-            <span className={active ? 'is-visible' : ''}>6QI 82 / PDB 100 ms</span>
-          </dd>
+          <dd>{dynamic ? (active ? '6QI 82 / PDB 100 ms' : '6QI 9 / PDB 300 ms') : profile.latencyClass}</dd>
         </div>
         <div>
           <dt>Flow Mapping</dt>
-          <dd className="scenario3-qos-switch">
-            <span className={active ? '' : 'is-visible'}>QFI 5</span>
-            <span className={active ? 'is-visible' : ''}>QFI 8</span>
-          </dd>
+          <dd>{dynamic ? (active ? 'QFI 8' : 'QFI 5') : profile.flow}</dd>
         </div>
         <div>
           <dt>Scheduling</dt>
-          <dd className="scenario3-qos-switch">
-            <span className={active ? '' : 'is-visible'}>Baseline</span>
-            <span className={active ? 'is-visible' : ''}>High</span>
-          </dd>
+          <dd>{dynamic ? (active ? 'High' : 'Baseline') : profile.scheduling}</dd>
         </div>
         <div>
           <dt>Last Updated</dt>
@@ -1350,6 +1334,99 @@ function OutcomeRow({ label, value, tone }: { label: string; value: number; tone
   )
 }
 
+function OutcomeHeatmap({
+  state,
+  resultByID,
+}: {
+  state: DemoState | null
+  resultByID: Record<string, UploadResult>
+}) {
+  const cells = useMemo(() => {
+    const users = state?.users ?? []
+    return users.slice(0, 50).map((user, index) => {
+      const status = displayStatusForUser(user, resultByID[user.client_id])
+      const outcome = outcomeHeatmapStatus(user, status)
+      return {
+        id: user.client_id,
+        label: ueShortLabel(user),
+        status: outcome.label,
+        tone: outcome.tone,
+        value: outcome.value,
+        x: index % 10,
+        y: Math.floor(index / 10),
+      }
+    })
+  }, [resultByID, state])
+
+  if (!cells.length) {
+    return <div className="outcome-heatmap is-empty">--</div>
+  }
+
+  return (
+    <div className="outcome-heatmap" aria-label="UE outcome heatmap">
+      <MeasuredChart>
+        {({ width, height }) => <OutcomeHeatmapChart width={width} height={height} points={cells} />}
+      </MeasuredChart>
+    </div>
+  )
+}
+
+function OutcomeHeatmapChart({
+  width,
+  height,
+  points,
+}: {
+  width: number
+  height: number
+  points: OutcomeHeatmapPoint[]
+}) {
+  const chartRef = useRef<EChartsInstance | null>(null)
+  const chartNodeRef = useRef<HTMLDivElement>(null)
+  const [ready, setReady] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+
+    Promise.all([
+      import('echarts/core'),
+      import('echarts/charts'),
+      import('echarts/components'),
+      import('echarts/renderers'),
+    ]).then(([echarts, charts, components, renderers]) => {
+      if (cancelled || !chartNodeRef.current) {
+        return
+      }
+      echarts.use([
+        charts.HeatmapChart,
+        components.GridComponent,
+        components.TitleComponent,
+        components.TooltipComponent,
+        components.VisualMapComponent,
+        renderers.CanvasRenderer,
+      ])
+      chartRef.current = echarts.init(chartNodeRef.current, null, { renderer: 'canvas' })
+      setReady(true)
+    })
+
+    return () => {
+      cancelled = true
+      chartRef.current?.dispose()
+      chartRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!ready || !chart) {
+      return
+    }
+    chart.resize({ width, height })
+    chart.setOption(makeOutcomeHeatmapOption(points), true)
+  }, [height, points, ready, width])
+
+  return <div className="outcome-heatmap-canvas" ref={chartNodeRef} />
+}
+
 const CrowdLatencyStrip = memo(function CrowdLatencyStrip({
   className,
   samples,
@@ -1369,15 +1446,28 @@ const LatencyBarsStrip = memo(function LatencyBarsStrip({
   className: string
   samples: number[]
 }) {
-  const heights = useMemo(() => latencyBarHeights(samples, barCount), [barCount, samples])
+  const bars = useMemo(() => latencyBarData(samples, barCount), [barCount, samples])
   const hasData = samples.some((value) => value > 0)
+  const chartWidth = barCount * 8
+  const chartHeight = 20
+  const barWidth = 5
+  const targetY = Math.round(chartHeight - (LATENCY_BAR_TARGET_MS / LATENCY_BAR_MAX_MS) * chartHeight)
 
   return (
-    <div className={`latency-bars-chart ${className} ${hasData ? 'has-data' : 'is-standby'}`} aria-hidden="true">
-      {heights.map((height, index) => (
-        <span key={index} style={{ height: `${height}%` }} />
-      ))}
-    </div>
+    <svg
+      className={`latency-bars-chart ${className} ${hasData ? 'has-data' : 'is-standby'}`}
+      viewBox={`0 0 ${chartWidth} ${chartHeight}`}
+      preserveAspectRatio="none"
+      aria-hidden="true"
+    >
+      <line className="latency-bars-target" x1="0" x2={chartWidth} y1={targetY} y2={targetY} />
+      {bars.map((bar, index) => {
+        const height = latencyBarHeight(bar.latency, chartHeight)
+        const x = index * 8 + 1.5
+        const y = chartHeight - height
+        return <rect key={bar.index} x={x} y={y} width={barWidth} height={height} rx="1.3" />
+      })}
+    </svg>
   )
 })
 
@@ -1485,8 +1575,8 @@ function labelForFilter(filter: BoardFilter) {
       return 'Healthy'
     case 'delayed':
       return 'Delayed'
-    case 'critical':
-      return 'Critical'
+    case 'degraded':
+      return 'Degraded'
   }
 }
 
@@ -1523,11 +1613,11 @@ function aiOutcomeForStatus(status: DemoUserStatus, uploading?: boolean) {
     case 'good':
       return { label: 'Healthy', tone: 'healthy' }
     case 'delayed':
-      return { label: 'Degraded', tone: 'degraded' }
+      return { label: 'Delayed', tone: 'degraded' }
     case 'high':
-      return { label: 'Critical', tone: 'critical' }
+      return { label: 'Degraded', tone: 'critical' }
     case 'failed':
-      return { label: 'Failed', tone: 'failed' }
+      return { label: 'Degraded', tone: 'failed' }
     case 'running':
       return { label: 'Uploading', tone: 'running' }
     case 'idle':
@@ -1537,12 +1627,32 @@ function aiOutcomeForStatus(status: DemoUserStatus, uploading?: boolean) {
   }
 }
 
-function heroUserForScenario3(state: DemoState | null, resultByID: Record<string, UploadResult>) {
-  if (!state || state.strategy !== 'dynamic_qos') {
+function outcomeHeatmapStatus(user: DemoUser, status: DemoUserStatus) {
+  if (!user.active && !user.uploading && !user.running) {
+    return { label: 'Idle', tone: 'idle', value: 0 }
+  }
+  if (status === 'good') {
+    return { label: 'Healthy', tone: 'healthy', value: 1 }
+  }
+  if (status === 'delayed') {
+    return { label: 'Delayed', tone: 'degraded', value: 2 }
+  }
+  if (status === 'high' || status === 'failed') {
+    return { label: 'Degraded', tone: 'critical', value: 3 }
+  }
+  return { label: 'Waiting', tone: 'waiting', value: 0 }
+}
+
+function heroUserForStrategy(state: DemoState | null, resultByID: Record<string, UploadResult>) {
+  if (!state) {
     return null
+  }
+  if (state.strategy !== 'dynamic_qos') {
+    return state.users.find((user) => user.index === 1) ?? state.users[0] ?? null
   }
   const activeUsers = state.users.filter((user) => user.active)
   return (
+    state.users.find((user) => user.index === 1 && (user.active || isUserOnline(user))) ??
     activeUsers.find((user) => {
       const result = resultByID[user.client_id]
       return result?.success === true && result.latency_ms > 0 && result.latency_ms < 100
@@ -1552,6 +1662,48 @@ function heroUserForScenario3(state: DemoState | null, resultByID: Record<string
     activeUsers.find((user) => user.running) ??
     null
   )
+}
+
+function heroProfileForStrategy(strategy: StrategyName) {
+  switch (strategy) {
+    case 'standard_gbr':
+      return {
+        chip: 'Non-GBR',
+        dynamic: false,
+        flow: 'QFI 5',
+        gbr: 'N/A',
+        heading: 'Non-GBR',
+        latencyClass: '6QI 9 / PDB 300 ms',
+        qosName: 'Non-GBR treatment',
+        scheduling: 'Baseline',
+        state: 'Baseline',
+      }
+    case 'dynamic_qos':
+      return {
+        chip: 'Dynamic QoS',
+        dynamic: true,
+        flow: 'QFI 5',
+        gbr: 'N/A',
+        heading: 'Grant',
+        latencyClass: '6QI 9 / PDB 300 ms',
+        qosName: 'Dynamic QoS',
+        scheduling: 'Baseline',
+        state: 'Baseline',
+      }
+    case 'no_optimization':
+    default:
+      return {
+        chip: 'Public QoS',
+        dynamic: false,
+        flow: 'QFI 5',
+        gbr: 'N/A',
+        heading: 'Public',
+        latencyClass: '6QI 9 / PDB 300 ms',
+        qosName: 'Public treatment',
+        scheduling: 'Baseline',
+        state: 'Baseline',
+      }
+  }
 }
 
 function imsiForUser(user: DemoUser) {
@@ -1603,6 +1755,8 @@ const BANDWIDTH_SAMPLE_MS = 150
 const BANDWIDTH_SAMPLE_COUNT = 40
 const BANDWIDTH_UPDATE_MS = 700
 const LATENCY_BARS_UPDATE_MS = 1000
+const LATENCY_BAR_TARGET_MS = 100
+const LATENCY_BAR_MAX_MS = 150
 const QOS_CYCLE_MS = 1000
 const QOS_ACTIVE_MS = 500
 const QOS_PROFILE_SWITCH_MS = 700
@@ -1836,7 +1990,7 @@ function makeLatencyBoxOption(points: LatencyBoxPoint[]) {
   return {
     animation: false,
     backgroundColor: 'transparent',
-    grid: { top: 12, right: 48, bottom: 28, left: 36 },
+    grid: { top: 12, right: 86, bottom: 28, left: 36 },
     tooltip: {
       borderColor: '#dce3ef',
       borderRadius: 8,
@@ -1904,9 +2058,30 @@ function makeLatencyBoxOption(points: LatencyBoxPoint[]) {
         markArea: {
           silent: true,
           data: [
-            [{ yAxis: 300, itemStyle: { color: 'rgba(255, 237, 213, 0.36)' } }, { yAxis: 1000 }],
-            [{ yAxis: 150, itemStyle: { color: 'rgba(254, 243, 199, 0.34)' } }, { yAxis: 300 }],
-            [{ yAxis: 0, itemStyle: { color: 'rgba(209, 250, 229, 0.3)' } }, { yAxis: 150 }],
+            [
+              {
+                yAxis: 300,
+                itemStyle: { color: 'rgba(255, 237, 213, 0)' },
+                label: { color: '#dc2626', fontSize: 10, fontWeight: 700, position: 'insideRight', formatter: 'Degraded\n>300ms' },
+              },
+              { yAxis: 1000 },
+            ],
+            [
+              {
+                yAxis: 150,
+                itemStyle: { color: 'rgba(254, 243, 199, 0)' },
+                label: { color: '#d97706', fontSize: 10, fontWeight: 700, position: 'insideRight', formatter: 'Delayed\n150-300ms' },
+              },
+              { yAxis: 300 },
+            ],
+            [
+              {
+                yAxis: 0,
+                itemStyle: { color: 'rgba(209, 250, 229, 0)' },
+                label: { color: '#16a34a', fontSize: 10, fontWeight: 700, position: 'insideRight', formatter: 'Healthy\n<=150ms' },
+              },
+              { yAxis: 150 },
+            ],
           ],
         },
         medianStyle: {
@@ -1935,6 +2110,86 @@ function makeLatencyBoxOption(points: LatencyBoxPoint[]) {
       },
     ],
   }
+}
+
+function makeOutcomeHeatmapOption(points: OutcomeHeatmapPoint[]) {
+  const xCategories = Array.from({ length: 10 }, (_, index) => String(index + 1))
+  const yCategories = Array.from({ length: 5 }, (_, index) => String(index + 1))
+  const completed = points.filter((point) => point.value > 0).length
+  const healthy = points.filter((point) => point.value === 1).length
+  const healthyPct = completed > 0 ? Math.round((healthy / completed) * 100) : 0
+
+  return {
+    animation: false,
+    backgroundColor: 'transparent',
+    title: {
+      text: `${healthyPct}% Healthy`,
+      left: 2,
+      top: 0,
+      textStyle: {
+        color: '#166534',
+        fontSize: 12,
+        fontWeight: 750,
+      },
+    },
+    grid: { top: 22, right: 2, bottom: 2, left: 2 },
+    tooltip: {
+      borderColor: '#dce3ef',
+      borderRadius: 8,
+      backgroundColor: 'rgba(255, 255, 255, 0.96)',
+      confine: true,
+      padding: 7,
+      textStyle: { color: '#101828', fontSize: 11 },
+      formatter: (params: unknown) => formatOutcomeHeatmapTooltip(params),
+    },
+    xAxis: {
+      type: 'category',
+      data: xCategories,
+      show: false,
+    },
+    yAxis: {
+      type: 'category',
+      data: yCategories,
+      show: false,
+    },
+    visualMap: {
+      type: 'piecewise',
+      show: false,
+      dimension: 2,
+      pieces: [
+        { value: 0, color: '#e5e7eb' },
+        { value: 1, color: '#22a34a' },
+        { value: 2, color: '#f59e0b' },
+        { value: 3, color: '#ef4444' },
+      ],
+    },
+    series: [
+      {
+        type: 'heatmap',
+        data: points.map((point) => [point.x, 4 - point.y, point.value, point.label, point.status]),
+        progressive: 0,
+        itemStyle: {
+          borderColor: '#ffffff',
+          borderWidth: 2.5,
+          borderRadius: 2,
+        },
+        emphasis: {
+          itemStyle: {
+            borderColor: '#101828',
+            borderWidth: 1,
+          },
+        },
+      },
+    ],
+  }
+}
+
+function formatOutcomeHeatmapTooltip(params: unknown) {
+  const payload = isRecord(params) ? params : {}
+  const value = Array.isArray(payload.value) ? payload.value : []
+  const label = typeof value[3] === 'string' ? value[3] : 'UE'
+  const status = typeof value[4] === 'string' ? value[4] : 'Unknown'
+  return `<strong>${label}</strong><br/>${status}`
 }
 
 function formatLatencyDistributionTooltip(params: unknown) {
@@ -1971,19 +2226,87 @@ function compactHistoryByActive(points: HistoryPoint[]) {
 }
 
 function compactOutcomeHistory(points: HistoryPoint[]): OutcomeHistoryPoint[] {
-  return compactHistoryByActive(points).map(({ active, goodPct, degradedPct, highPct, failedPct }) => ({ active, goodPct, degradedPct, highPct, failedPct }))
+  return compactHistoryByActive(points).map(({ active, goodPct, degradedPct, highPct, failedPct }) => ({
+    active,
+    goodPct,
+    degradedPct,
+    highPct: highPct + failedPct,
+    failedPct: 0,
+  }))
 }
 
-function goodLatencyPercent(state: DemoState) {
-  return state.counters.active_users > 0 ? Math.round((state.counters.good_users / state.counters.active_users) * 100) : 0
+function liveOutcomeSummary(state: DemoState | null, resultByID: Record<string, UploadResult>): OutcomeSummary {
+  if (!state) {
+    return emptyOutcomeSummary()
+  }
+
+  const activeUsers = state.users.filter((user) => user.active || user.uploading || user.running)
+  let good = 0
+  let delayed = 0
+  let high = 0
+  let failed = 0
+
+  for (const user of activeUsers) {
+    const status = displayStatusForUser(user, resultByID[user.client_id])
+    if (status === 'good') {
+      good++
+    } else if (status === 'delayed') {
+      delayed++
+    } else if (status === 'high') {
+      high++
+    } else if (status === 'failed') {
+      failed++
+    }
+  }
+
+  const completedUsers = good + delayed + high + failed
+  const percentOfCompleted = (value: number) => (completedUsers > 0 ? Math.round((value / completedUsers) * 100) : 0)
+
+  return {
+    activeUsers: activeUsers.length,
+    completedUsers,
+    good,
+    delayed,
+    high,
+    failed,
+    goodPct: percentOfCompleted(good),
+    degradedPct: percentOfCompleted(delayed),
+    highPct: percentOfCompleted(high + failed),
+    failedPct: 0,
+  }
 }
 
-function criticalPercent(state: DemoState) {
-  return state.counters.active_users > 0 ? Math.round((state.counters.high_users / state.counters.active_users) * 100) : 0
+function emptyOutcomeSummary(): OutcomeSummary {
+  return {
+    activeUsers: 0,
+    completedUsers: 0,
+    good: 0,
+    delayed: 0,
+    high: 0,
+    failed: 0,
+    goodPct: 0,
+    degradedPct: 0,
+    highPct: 0,
+    failedPct: 0,
+  }
 }
 
-function failedPercent(state: DemoState) {
-  return state.counters.active_users > 0 ? Math.round((state.counters.failed_users / state.counters.active_users) * 100) : 0
+function mergeLiveOutcomePoint(points: HistoryPoint[], outcome: OutcomeSummary): OutcomeHistoryPoint[] {
+  const base = compactOutcomeHistory(points)
+  if (outcome.completedUsers <= 0) {
+    return base
+  }
+
+  const active = Math.max(outcome.activeUsers, outcome.completedUsers)
+  const livePoint = {
+    active,
+    goodPct: outcome.goodPct,
+    degradedPct: outcome.degradedPct,
+    highPct: outcome.highPct,
+    failedPct: outcome.failedPct,
+  }
+
+  return [...base.filter((point) => point.active !== active), livePoint].sort((left, right) => left.active - right.active)
 }
 
 function prioritizedCount(state: DemoState) {
@@ -2203,7 +2526,7 @@ function filterDeviceCards(cards: DeviceCardView[], filter: BoardFilter) {
       return cards.filter((card) => card.displayStatus === 'good')
     case 'delayed':
       return cards.filter((card) => card.displayStatus === 'delayed')
-    case 'critical':
+    case 'degraded':
       return cards.filter((card) => card.displayStatus === 'high' || card.displayStatus === 'failed')
     case 'all':
     default:
@@ -2218,7 +2541,7 @@ function boardFilterCounts(cards: DeviceCardView[]): Record<BoardFilter, number>
     temporary: cards.filter((card) => card.user.active && card.user.treatment === 'temporary_grant').length,
     healthy: cards.filter((card) => card.displayStatus === 'good').length,
     delayed: cards.filter((card) => card.displayStatus === 'delayed').length,
-    critical: cards.filter((card) => card.displayStatus === 'high' || card.displayStatus === 'failed').length,
+    degraded: cards.filter((card) => card.displayStatus === 'high' || card.displayStatus === 'failed').length,
   }
 }
 
