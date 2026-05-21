@@ -189,6 +189,7 @@ func runControl(listenAddr string) error {
 }
 
 func (m *ScenarioManager) registerRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/v1/healthz", handleHealthz)
 	mux.HandleFunc("/v1/demo/session", m.handleDemoSession)
 	mux.HandleFunc("/v1/demo/state", m.handleDemoState)
 	mux.HandleFunc("/v1/demo/run/start", m.handleDemoRunStart)
@@ -206,6 +207,18 @@ func (m *ScenarioManager) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/scenario", m.handleDeleteScenario)
 	mux.HandleFunc("/v1/clients/", m.handleClientProfile)
 	mux.HandleFunc("/v1/metrics/sample", m.handleMetricsSample)
+	registerStaticUI(mux)
+}
+
+func handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", strings.Join([]string{http.MethodGet, http.MethodHead}, ", "))
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte("ok\n"))
 }
 
 func (m *ScenarioManager) handleSetup(w http.ResponseWriter, r *http.Request) {

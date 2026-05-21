@@ -1,10 +1,13 @@
 import { memo, startTransition, useDeferredValue, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
-import type { CSSProperties, ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
+import { Box, Card, CardContent, Chip, Typography } from '@mui/material'
 import {
   Activity,
   AlertTriangle,
-  CircleDot,
+  Camera,
+  Gauge,
+  ImageUp,
   Play,
   Radio,
   RefreshCcw,
@@ -24,7 +27,10 @@ import {
 import {
   Area,
   AreaChart,
+  CartesianGrid,
   Cell,
+  Line,
+  LineChart,
   Pie,
   PieChart,
   Tooltip,
@@ -33,6 +39,7 @@ import {
 } from 'recharts'
 import type { DemoStreamStatus } from './api'
 import type { DemoState, DemoStreamEvent, DemoUser, DemoUserStatus, StrategyName, UploadResult } from './types'
+import scenario3HeroImage from './assets/scenario3-robot-street-view.webp'
 import './App.css'
 
 const strategies: Array<{ label: string; value: StrategyName; short: string; tone: 'blue' | 'orange' | 'purple' }> = [
@@ -41,7 +48,7 @@ const strategies: Array<{ label: string; value: StrategyName; short: string; ton
   { label: 'Dynamic QoS', value: 'dynamic_qos', short: 'Temporary grants', tone: 'purple' },
 ]
 
-const filterOptions = ['all', 'uploading', 'prioritized', 'public', 'online'] as const
+const filterOptions = ['all', 'uploading', 'temporary', 'healthy', 'delayed', 'critical'] as const
 const sortOptions = ['latency', 'ue', 'status'] as const
 
 type PendingAction = 'mode' | 'run' | 'stop' | 'reset' | 'refresh'
@@ -74,7 +81,32 @@ type BoxPlotStats = {
   q3: number
   max: number
 }
-type BoxPlotPoint = HistoryPoint & { box: BoxPlotStats }
+type LatencyBoxPoint = {
+  active: number
+  failedCount: number
+  max: number
+  median: number
+  min: number
+  q1: number
+  q3: number
+}
+type EChartsInstance = ReturnType<typeof import('echarts/core')['init']>
+type LiveResultState = {
+  resultByID: Record<string, UploadResult>
+  latencyHistoryByID: Record<string, number[]>
+}
+type DeviceCardView = {
+  user: DemoUser
+  label: string
+  online: boolean
+  displayStatus: DemoUserStatus
+  displayLatencyMS: number
+  treatmentClass: string
+  outcome: { label: string; tone: string }
+  latencyText: string
+  accessibleLabel: string
+  latencyHistory: number[]
+}
 
 const initialPendingState: PendingActions = {
   mode: false,
@@ -82,6 +114,21 @@ const initialPendingState: PendingActions = {
   stop: false,
   reset: false,
   refresh: false,
+}
+
+function emptyLiveResultState(): LiveResultState {
+  return { resultByID: {}, latencyHistoryByID: {} }
+}
+
+function sameUploadResult(left: UploadResult | undefined, right: UploadResult) {
+  return Boolean(
+    left &&
+    left.attempt === right.attempt &&
+    left.success === right.success &&
+    left.latency_ms === right.latency_ms &&
+    left.phase_ms === right.phase_ms &&
+    left.at === right.at,
+  )
 }
 
 function App() {
@@ -134,8 +181,7 @@ function useDemoLiveState() {
   const [streamStatus, setStreamStatus] = useState<DemoStreamStatus>('connecting')
   const [pending, setPending] = useState<PendingActions>(initialPendingState)
   const [pendingStrategy, setPendingStrategy] = useState<StrategyName | null>(null)
-  const [resultByID, setResultByID] = useState<Record<string, UploadResult>>({})
-  const [latencyHistoryByID, setLatencyHistoryByID] = useState<Record<string, number[]>>({})
+  const [liveResults, setLiveResults] = useState<LiveResultState>(() => emptyLiveResultState())
   const [historyPoints, setHistoryPoints] = useState<HistoryPoint[]>([])
   const recordedAttemptsRef = useRef<Record<string, number>>({})
   const stateRef = useRef<DemoState | null>(null)
@@ -151,8 +197,7 @@ function useDemoLiveState() {
 
   function resetSandboxState() {
     recordedAttemptsRef.current = {}
-    setResultByID({})
-    setLatencyHistoryByID({})
+    setLiveResults(emptyLiveResultState())
     setHistoryPoints([])
   }
 
@@ -265,26 +310,36 @@ function useDemoLiveState() {
       }
 
       startTransition(() => {
-        setResultByID((current) => {
-          const next = { ...current }
-          for (const item of items) {
-            next[item.id] = item
-          }
-          return next
-        })
+        setLiveResults((current) => {
+          let nextResultByID = current.resultByID
+          let nextLatencyHistoryByID = current.latencyHistoryByID
+          let changed = false
 
-        setLatencyHistoryByID((current) => {
-          const next = { ...current }
-          for (const item of freshItems) {
-            const history = next[item.id] ? [...next[item.id]] : []
-            history.push(item.latency_ms)
-            next[item.id] = history.slice(-36)
+          for (const item of items) {
+            if (!sameUploadResult(nextResultByID[item.id], item)) {
+              if (nextResultByID === current.resultByID) {
+                nextResultByID = { ...current.resultByID }
+              }
+              nextResultByID[item.id] = item
+              changed = true
+            }
           }
-          return next
+
+          for (const item of freshItems) {
+            if (nextLatencyHistoryByID === current.latencyHistoryByID) {
+              nextLatencyHistoryByID = { ...current.latencyHistoryByID }
+            }
+            const history = nextLatencyHistoryByID[item.id] ? [...nextLatencyHistoryByID[item.id]] : []
+            history.push(item.latency_ms)
+            nextLatencyHistoryByID[item.id] = history.slice(-36)
+            changed = true
+          }
+
+          return changed ? { resultByID: nextResultByID, latencyHistoryByID: nextLatencyHistoryByID } : current
         })
 
         const currentState = stateRef.current
-        if (currentState) {
+        if (currentState && freshItems.length > 0) {
           setHistoryPoints((current) => {
             const point = makeHistoryPointFromResults(currentState, items, current.length)
             return point ? appendHistoryPoint(current, point) : current
@@ -306,10 +361,10 @@ function useDemoLiveState() {
   return {
     error,
     historyPoints,
-    latencyHistoryByID,
+    latencyHistoryByID: liveResults.latencyHistoryByID,
     loading,
     pending,
-    resultByID,
+    resultByID: liveResults.resultByID,
     state,
     streamStatus,
     pendingStrategy,
@@ -451,9 +506,9 @@ function StrategyComparison({
             disabled={pending}
             onClick={() => void onModeSelect(strategy.value)}
           >
-            <div className="comparison-head">
-              <span className="comparison-radio" aria-hidden="true" />
-              <div className="comparison-icon">{scenario.icon}</div>
+          <div className="comparison-head">
+            <span className="comparison-radio" aria-hidden="true" />
+            <div className="comparison-icon">{scenario.icon}</div>
               <h3>{strategy.label}</h3>
               {isSwitching ? <span className="active-badge">Switching</span> : isApplied ? <span className="active-badge">Active</span> : null}
             </div>
@@ -492,12 +547,18 @@ function StrategyOutcomeMiniChart({
 
   return (
     <div className={`strategy-outcome-mini tone-${tone}`} aria-hidden="true">
-      <svg viewBox="0 0 180 42" preserveAspectRatio="none" focusable="false">
-        <path d={outcomeBandPath(chartPoints, maxActive, 0, (point) => point.goodPct)} fill="#86d993" />
-        <path d={outcomeBandPath(chartPoints, maxActive, (point) => point.goodPct, (point) => point.goodPct + point.degradedPct)} fill="#fbd38d" />
-        <path d={outcomeBandPath(chartPoints, maxActive, (point) => point.goodPct + point.degradedPct, (point) => point.goodPct + point.degradedPct + point.highPct)} fill="#fdba74" />
-        <path d={outcomeBandPath(chartPoints, maxActive, (point) => point.goodPct + point.degradedPct + point.highPct, (point) => point.goodPct + point.degradedPct + point.highPct + point.failedPct)} fill="#dc2626" />
-      </svg>
+      <MeasuredChart>
+        {({ width, height }) => (
+          <AreaChart width={width} height={height} data={chartPoints} margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
+            <XAxis dataKey="active" type="number" domain={[0, maxActive]} hide />
+            <YAxis domain={[0, 100]} hide />
+            <Area type="monotone" dataKey="goodPct" stackId="outcome" stroke="none" fill="#86d993" isAnimationActive={false} />
+            <Area type="monotone" dataKey="degradedPct" stackId="outcome" stroke="none" fill="#fbd38d" isAnimationActive={false} />
+            <Area type="monotone" dataKey="highPct" stackId="outcome" stroke="none" fill="#fdba74" isAnimationActive={false} />
+            <Area type="monotone" dataKey="failedPct" stackId="outcome" stroke="none" fill="#dc2626" isAnimationActive={false} />
+          </AreaChart>
+        )}
+      </MeasuredChart>
     </div>
   )
 }
@@ -624,29 +685,24 @@ function prepareOutcomeChartPoints(points: OutcomeHistoryPoint[]) {
   return sorted
 }
 
-function outcomeBandPath(
-  points: OutcomeHistoryPoint[],
-  maxActive: number,
-  lowerValue: number | ((point: OutcomeHistoryPoint) => number),
-  upperValue: (point: OutcomeHistoryPoint) => number,
-) {
-  const top = 3
-  const bottom = 39
-  const height = bottom - top
-  const x = (point: OutcomeHistoryPoint) => ((point.active / maxActive) * 180).toFixed(2)
-  const y = (value: number) => (bottom - (clampPercent(value) / 100) * height).toFixed(2)
-  const lower = (point: OutcomeHistoryPoint) => (typeof lowerValue === 'number' ? lowerValue : lowerValue(point))
-  const upperPoints = points.map((point) => `${x(point)} ${y(upperValue(point))}`)
-  const lowerPoints = [...points].reverse().map((point) => `${x(point)} ${y(lower(point))}`)
-
-  return `M ${upperPoints.join(' L ')} L ${lowerPoints.join(' L ')} Z`
+function latencyBarData(samples: number[], barCount: number) {
+  const displaySamples = samples.slice(-barCount)
+  return Array.from({ length: barCount }, (_, index) => {
+    const value = displaySamples[index - (barCount - displaySamples.length)] ?? 0
+    return {
+      index,
+      latency: clampChartLatency(value),
+    }
+  })
 }
 
-function clampPercent(value: number) {
-  if (!Number.isFinite(value)) {
-    return 0
-  }
-  return Math.max(0, Math.min(100, value))
+function latencyBarHeights(samples: number[], barCount: number) {
+  return latencyBarData(samples, barCount).map((item) => {
+    if (item.latency <= 0) {
+      return 0
+    }
+    return Math.max(2, Math.round((Math.min(item.latency, 300) / 300) * 100))
+  })
 }
 
 function AnalyticsColumn({
@@ -672,6 +728,7 @@ function AnalyticsColumn({
   const treatmentPct = (value: number) => (treatmentTotal > 0 ? Math.round((value / treatmentTotal) * 100) : 0)
   const chartPoints = compactHistoryByActive(historyPoints)
   const chartMaxUsers = Math.max(state?.users.length ?? 0, ...chartPoints.map((point) => point.active), 1)
+  const chartsReady = Boolean(state?.running && chartPoints.length)
 
   return (
     <section className="analytics-column" aria-label="Simulation analytics">
@@ -684,12 +741,12 @@ function AnalyticsColumn({
           </div>
           <div className="empty-chart">
             <div className="line-chart-wrap">
-              {chartPoints.length ? (
+              {chartsReady ? (
                 <MeasuredChart>
-                  {({ width, height }) => <LatencyBoxPlotChart width={width} height={height} points={chartPoints} maxUsers={chartMaxUsers} />}
+                  {({ width, height }) => <LatencyBoxPlotChart width={width} height={height} points={chartPoints} />}
                 </MeasuredChart>
               ) : (
-                <ChartEmpty label="Distribution appears when the run starts" />
+                <ChartEmpty label="Standby until live latency data arrives" />
               )}
             </div>
             <div className="threshold-stack">
@@ -704,7 +761,7 @@ function AnalyticsColumn({
       <Panel title="Upload Outcome Distribution">
         <div className="outcome-layout">
           <div className="area-chart-wrap">
-            {chartPoints.length ? (
+            {chartsReady ? (
               <MeasuredChart>
                 {({ width, height }) => (
                   <AreaChart width={width} height={height} data={chartPoints} margin={{ top: 6, right: 6, bottom: 0, left: -24 }}>
@@ -719,7 +776,7 @@ function AnalyticsColumn({
                 )}
               </MeasuredChart>
             ) : (
-              <ChartEmpty label="Outcome history is empty" />
+              <ChartEmpty label="Standby until live outcome data arrives" />
             )}
           </div>
           <div className="donut-chart-wrap">
@@ -785,22 +842,26 @@ const DeviceBoard = memo(function DeviceBoard({
   const [sortMode, setSortMode] = useState<BoardSort>('ue')
   const users = useMemo(() => state?.users ?? [], [state])
   const deferredResultByID = useDeferredValue(resultByID)
-  const deferredLatencyHistoryByID = useDeferredValue(latencyHistoryByID)
-  const onlineCount = state?.users.filter(isUserOnline).length ?? 0
-  const uploadingCount = users.filter((user) => user.active && (user.uploading || user.running)).length
+  const throttledLatencyHistoryByID = useThrottledValue(latencyHistoryByID, LATENCY_BARS_UPDATE_MS)
+  const deferredLatencyHistoryByID = useDeferredValue(throttledLatencyHistoryByID)
   const scenario3Hero = heroUserForScenario3(state, deferredResultByID)
-  const filterCounts = useMemo(() => boardFilterCounts(users), [users])
-  const visibleUsers = useMemo(
-    () => sortUsers(filterUsers(users, filter), sortMode, deferredResultByID),
-    [users, deferredResultByID, filter, sortMode],
+  const heroUsers = useMemo(() => (scenario3Hero ? [scenario3Hero] : []), [scenario3Hero])
+  const heroIDs = useMemo(() => new Set(heroUsers.map((user) => user.client_id)), [heroUsers])
+  const crowdUsers = useMemo(() => users.filter((user) => !heroIDs.has(user.client_id)), [users, heroIDs])
+  const crowdCards = useMemo(
+    () => crowdUsers.map((user) => makeDeviceCardView(user, deferredResultByID[user.client_id], deferredLatencyHistoryByID[user.client_id] ?? [])),
+    [crowdUsers, deferredLatencyHistoryByID, deferredResultByID],
   )
-
+  const filterCounts = useMemo(() => boardFilterCounts(crowdCards), [crowdCards])
+  const visibleUsers = useMemo(
+    () => sortDeviceCards(filterDeviceCards(crowdCards, filter), sortMode),
+    [crowdCards, filter, sortMode],
+  )
   return (
-    <section className="panel activity-board">
-      <div className="panel-title-row">
-        <div className="ai-monitor-title">
-          <h2>AI Upload UE Monitor</h2>
-          <span>{onlineCount} online · {uploadingCount} uploading · target AI response &lt;100 ms</span>
+    <section className="panel activity-board ue-monitor-root">
+      <div className="ue-monitor-top">
+        <div className="ue-monitor-title">
+          <h2>UE MONITOR</h2>
         </div>
         <div className="sort-control">
           <span>Sort By</span>
@@ -814,138 +875,113 @@ const DeviceBoard = memo(function DeviceBoard({
         </div>
       </div>
 
-      <div className="board-tabs" role="tablist" aria-label="UE filters">
-        {filterOptions.map((option) => (
-          <button key={option} className={filter === option ? 'is-active' : ''} type="button" onClick={() => setFilter(option)}>
-            <span>{labelForFilter(option)}</span>
-            <strong>{filterCounts[option]}</strong>
-          </button>
-        ))}
-      </div>
-
-      <Scenario3HeroCard
-        state={state}
-        hero={scenario3Hero}
-        latestResult={scenario3Hero ? deferredResultByID[scenario3Hero.client_id] : undefined}
-      />
-
-      {state ? (
-        visibleUsers.length ? (
-          <div className="ue-grid">
-            {visibleUsers.map((user, index) => (
-              <DeviceCard
-                key={user.client_id}
-                user={user}
-                latestResult={deferredResultByID[user.client_id]}
-                latencyHistory={deferredLatencyHistoryByID[user.client_id] ?? []}
-                index={index}
-                runActive={state.running}
+      <div className={`ue-monitor-body ${heroUsers.length ? 'has-hero' : 'no-hero'}`}>
+        {heroUsers.length ? (
+          <div className="ue-hero-column" aria-label="Hero UE cards">
+            {heroUsers.map((hero) => (
+              <Scenario3HeroCard
+                key={hero.client_id}
+                state={state}
+                hero={hero}
+                latestResult={deferredResultByID[hero.client_id]}
+                latencyHistory={deferredLatencyHistoryByID[hero.client_id] ?? []}
               />
             ))}
           </div>
-        ) : (
-          <div className="board-empty">No UEs match {labelForFilter(filter)}</div>
-        )
-      ) : (
-        <div className="board-empty">No session prepared</div>
-      )}
+        ) : null}
+
+        <div className="ue-crowd-board">
+          <div className="board-tabs" role="tablist" aria-label="UE filters">
+            {filterOptions.map((option) => (
+              <button key={option} className={filter === option ? 'is-active' : ''} type="button" onClick={() => setFilter(option)}>
+                <span>{labelForFilter(option)}</span>
+                <strong>{filterCounts[option]}</strong>
+              </button>
+            ))}
+          </div>
+
+          {state ? (
+            visibleUsers.length ? (
+              <div className="ue-grid">
+                {visibleUsers.map((card) => (
+                  <DeviceCard
+                    key={card.user.client_id}
+                    card={card}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="board-empty">No other UEs match {labelForFilter(filter)}</div>
+            )
+          ) : (
+            <div className="board-empty">No session prepared</div>
+          )}
+        </div>
+      </div>
     </section>
   )
 })
 
 const DeviceCard = memo(function DeviceCard({
-  user,
-  latestResult,
-  latencyHistory,
-  index,
-  runActive,
+  card,
 }: {
-  user: DemoUser
-  latestResult?: UploadResult
-  latencyHistory: number[]
-  index: number
-  runActive: boolean
+  card: DeviceCardView
 }) {
-  const online = isUserOnline(user)
-  const displayStatus = latestResult ? classifyResultStatus(latestResult) : online && user.status === 'planned' ? 'idle' : user.status
-  const displayLatencyMS = latestResult?.latency_ms ?? user.last_latency_ms ?? 0
-  const badge = qosBadgeMeta(user)
-  const treatmentClass = user.treatment === 'reserved' || user.treatment === 'temporary_grant' ? 'treatment-reserved' : 'treatment-public'
-  const uploadProgressActive = runActive && latestResult?.success === true
-  const uploadProgressSeed = `${user.client_id}:${latestResult?.attempt ?? user.attempts}:${latestResult?.at ?? user.last_seen ?? ''}`
-  const uploadProgressPhase = hashToUnit(`${uploadProgressSeed}:phase`)
-  const uploadProgressDuration = 1
-  const label = ueShortLabel(user)
-  const outcome = aiOutcomeForStatus(displayStatus, user.uploading)
-  const latencyText = displayLatencyMS > 0 ? formatLatency(displayLatencyMS) : online ? 'Waiting' : '--'
-  const accessibleLabel = `${label}, ${outcome.label}, ${latencyText}, ${badge.label}`
-
   return (
-    <motion.article
-      className={`ue-card status-${displayStatus} ${treatmentClass} ${online && !user.active ? 'is-online-idle' : ''} ${online ? '' : 'is-offline'}`}
-      aria-label={accessibleLabel}
-      title={accessibleLabel}
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: 0.05 + (index % 12) * 0.015 }}
+    <article
+      className={`ue-card status-${card.displayStatus} ${card.treatmentClass} ${card.online && !card.user.active ? 'is-online-idle' : ''} ${card.online ? '' : 'is-offline'}`}
+      aria-label={card.accessibleLabel}
+      title={card.accessibleLabel}
     >
       <div className="ue-card-top">
         <div className="ue-card-id">
           <span className="ue-status-dot" />
           <div className="ue-card-name">
-            <strong>{label}</strong>
+            <strong>{card.label}</strong>
           </div>
         </div>
-        <span className={`ue-treatment-badge treatment-${badge.tone}`}>{badge.short}</span>
+        <div className="ue-card-badges">
+          <span className="ue-dynamic-qos-badge" aria-label="Dynamic QoS">
+            <Sparkles size={14} aria-hidden="true" />
+          </span>
+        </div>
       </div>
 
       <div className="ue-card-body">
-        <div
-          className={`ue-health-indicator ${uploadProgressActive ? 'is-upload-progress' : ''}`}
-          style={
-            {
-              '--ring': uploadProgressActive ? 0.82 : ringPathLength(displayStatus),
-              '--ring-color': uploadProgressActive ? '#0ea5e9' : statusColor(displayStatus),
-              '--upload-cycle-duration': `${uploadProgressDuration.toFixed(3)}s`,
-              '--upload-cycle-delay': `-${(uploadProgressPhase * uploadProgressDuration).toFixed(3)}s`,
-            } as CSSProperties
-          }
-          role={uploadProgressActive ? 'progressbar' : undefined}
-          aria-label={uploadProgressActive ? `${label} upload progress` : undefined}
-          aria-valuetext={uploadProgressActive ? 'Cycling after successful upload' : undefined}
-          aria-hidden={uploadProgressActive ? undefined : true}
-        >
-          <svg className="progress-ring" viewBox="0 0 44 44">
-            <circle className="ring-track" cx="22" cy="22" r="17.5" pathLength="1" />
-            <circle
-              className="ring-value"
-              cx="22"
-              cy="22"
-              r="17.5"
-              pathLength="1"
-              strokeLinecap="round"
-            />
-          </svg>
-          <span className="dot-core" />
-        </div>
         <div className="ue-card-metrics">
-          <strong>{latencyText}</strong>
+          <strong>{card.latencyText}</strong>
         </div>
       </div>
 
-      <SparkBars samples={latencyHistory} />
-    </motion.article>
+      <CrowdLatencyStrip className={`crowd-latency-bars tone-${card.outcome.tone}`} samples={card.latencyHistory} />
+    </article>
   )
-})
+}, areDeviceCardsEqual)
+
+function areDeviceCardsEqual(previous: { card: DeviceCardView }, next: { card: DeviceCardView }) {
+  return (
+    previous.card.user.client_id === next.card.user.client_id &&
+    previous.card.user.active === next.card.user.active &&
+    previous.card.online === next.card.online &&
+    previous.card.displayStatus === next.card.displayStatus &&
+    previous.card.displayLatencyMS === next.card.displayLatencyMS &&
+    previous.card.treatmentClass === next.card.treatmentClass &&
+    previous.card.outcome.tone === next.card.outcome.tone &&
+    previous.card.latencyText === next.card.latencyText &&
+    previous.card.latencyHistory === next.card.latencyHistory
+  )
+}
 
 function Scenario3HeroCard({
   state,
   hero,
   latestResult,
+  latencyHistory,
 }: {
   state: DemoState | null
   hero: DemoUser | null
   latestResult?: UploadResult
+  latencyHistory: number[]
 }) {
   if (!state) {
     return null
@@ -969,75 +1005,290 @@ function Scenario3HeroCard({
     )
   }
 
-  const latency = latestResult?.latency_ms ?? hero.last_latency_ms ?? 0
+  const uploadDelay = latestResult?.latency_ms ?? hero.last_latency_ms ?? 0
   const displayStatus = latestResult ? classifyResultStatus(latestResult) : hero.uploading ? 'running' : hero.status
   const outcome = aiOutcomeForStatus(displayStatus, hero.uploading)
-  const beforeLatency = scenario3BeforeLatency(latency)
-  const improvement = latency > 0 ? Math.max(0, beforeLatency - latency) : 0
-  const grantActive = state.running && (hero.uploading || hero.treatment === 'temporary_grant')
   const recognized = recognitionLabelForUser(hero)
-  const latencyText = latency > 0 ? formatLatency(latency) : 'Waiting'
-  const targetMet = latestResult?.success === true && latency > 0 && latency < 100
+  const latencyText = uploadDelay > 0 ? formatLatency(uploadDelay) : 'Waiting'
+  const targetMet = latestResult?.success === true && uploadDelay > 0 && uploadDelay < 100
+  const grantLabel = 'Dynamic QoS'
+  const resultLabel = latestResult?.success ? `${recognized} recognized` : 'Waiting for result'
+  const e2eDelayText = uploadDelay > 0 ? formatLatency(e2eDelayForUploadDelay(uploadDelay, hero.index + hero.attempts)) : '--'
 
   return (
-    <article className={`scenario3-hero-card outcome-${outcome.tone}`}>
-      <div className="scenario3-hero-main">
-        <header className="scenario3-hero-head">
-          <div>
-            <span className="scenario3-eyebrow">Intent-assisted QoS</span>
-            <h3>{ueShortLabel(hero)} · {deviceTypeForUser(hero)}</h3>
-            <p>AI image recognition uplink · 1 image/s · target &lt;100 ms</p>
+    <Card className={`scenario3-hero-card outcome-${outcome.tone}`} variant="outlined">
+      <CardContent className="scenario3-hero-content">
+        <div className="scenario3-hero-head">
+          <Box className="scenario3-title-wrap">
+            <div className="scenario3-hero-title-row">
+              <span className="scenario3-hero-dot" aria-hidden="true" />
+              <Typography className="scenario3-hero-title" component="h3">
+                {ueShortLabel(hero)}
+              </Typography>
+            </div>
+            <Typography className="scenario3-identity-line" component="span">
+              {hero.client_ip} · IMSI {imsiForUser(hero)}
+            </Typography>
+            <div className="scenario3-pdu-line" aria-label="PDU session details">
+              <span>PDU-SESSION 1</span>
+              <span>DNN ai-vision</span>
+              <span>S-NSSAI 1/010203</span>
+            </div>
+          </Box>
+          <div className="scenario3-chip-row">
+            <Chip className={`scenario3-chip tone-${outcome.tone}`} size="small" label={outcome.label} />
+            <Chip className="scenario3-chip tone-grant" size="small" icon={<Sparkles size={12} aria-hidden="true" />} label={grantLabel} />
           </div>
-          <span className={`scenario3-status-pill tone-${outcome.tone}`}>
-            {grantActive ? 'Intent QoS active' : outcome.label}
-          </span>
-        </header>
-
-        <div className="scenario3-latency-block">
-          <span>AI response latency</span>
-          <strong>{latencyText}</strong>
-          <em>{outcome.label}</em>
         </div>
 
-        <div className="scenario3-flow" aria-label="Intent to result workflow">
-          <span>Intent reported</span>
-          <i />
-          <span>QoS grant</span>
-          <i />
-          <span>AI upload</span>
-          <i />
-          <span>{targetMet ? 'On-time result' : 'Result window'}</span>
-        </div>
-      </div>
+        <Box className={`scenario3-latency-section tone-${heroLatencyTone(uploadDelay)}`} aria-label="Image upload latency section">
+          <div className="scenario3-latency-block">
+            <span><ImageUp size={13} aria-hidden="true" /> IMAGE UPLOAD LATENCY</span>
+            <strong>{latencyText}</strong>
+            <em>{targetMet ? 'Target met' : 'Target <100 ms'}</em>
+          </div>
+          <div className="scenario3-latency-details">
+            <span>{deviceTypeForUser(hero)}</span>
+            <strong>AI image recognition · {formatUploadFrequency(state.scenario.interval_ms)}</strong>
+          </div>
+          <div className="scenario3-latency-spark" aria-hidden="true">
+            <LatencyBarsStrip className={`hero-latency-bars tone-${heroLatencyTone(uploadDelay)}`} samples={latencyHistory} barCount={12} />
+          </div>
+        </Box>
 
-      <div className="scenario3-hero-details">
-        <dl>
-          <div>
-            <dt>Before intent report</dt>
-            <dd>{formatLatency(beforeLatency)} · Missed target</dd>
+        <Scenario3LiveHeroPanels
+          baselineBandwidthMbps={state.bandwidth.public_rate_mbps}
+          frequency={formatUploadFrequency(state.scenario.interval_ms)}
+          intentSeed={hero.index + hero.attempts}
+          latencyText={latencyText}
+          running={Boolean(state.running)}
+          targetMet={targetMet}
+        />
+
+        <Box className="scenario3-latest-image">
+          <div className="scenario3-image-caption">
+            <span>Latest Image</span>
+            <strong>{resultLabel}</strong>
           </div>
-          <div>
-            <dt>During temporary grant</dt>
-            <dd>{latencyText} · {targetMet ? 'On time' : outcome.label}</dd>
+          <Box component="img" src={scenario3HeroImage} alt="" aria-hidden="true" />
+          <div className="scenario3-e2e-delay">
+            <span>E2E delay</span>
+            <strong>{e2eDelayText}</strong>
           </div>
-          <div>
-            <dt>Latency improvement</dt>
-            <dd>{improvement > 0 ? `-${formatLatency(improvement)}` : '--'}</dd>
-          </div>
-          <div>
-            <dt>Temporary QoS grant</dt>
-            <dd>Low-latency flow · 2 Mbps GBR · PDB 100 ms</dd>
-          </div>
-          <div>
-            <dt>Last AI result</dt>
-            <dd>{latestResult?.success ? `${recognized} recognized · success` : 'Waiting for successful result'}</dd>
-          </div>
-        </dl>
-        <aside>
-          The UE reports an upcoming AI image upload before the burst starts. The network applies an elevated QoS grant only for this short service window.
-        </aside>
+        </Box>
+      </CardContent>
+    </Card>
+  )
+}
+
+const Scenario3LiveHeroPanels = memo(function Scenario3LiveHeroPanels({
+  baselineBandwidthMbps,
+  frequency,
+  intentSeed,
+  latencyText,
+  running,
+  targetMet,
+}: {
+  baselineBandwidthMbps: number
+  frequency: string
+  intentSeed: number
+  latencyText: string
+  running: boolean
+  targetMet: boolean
+}) {
+  const chartClock = useQosCycleClock(running, BANDWIDTH_UPDATE_MS)
+  const profileClock = useQosProfileClock(running)
+
+  return (
+    <>
+      <Scenario3TrafficChart
+        baselineBandwidthMbps={baselineBandwidthMbps}
+        running={running}
+        qosStarted={chartClock.hasRun}
+        nowMS={chartClock.nowMS}
+        cycleAnchorMS={chartClock.cycleAnchorMS}
+      />
+
+      <Box className="scenario3-feature-grid">
+        <Scenario3IntentPanel
+          latencyText={latencyText}
+          targetMet={targetMet}
+          frequency={frequency}
+          sizeBytes={intentSizeBytes(intentSeed, profileClock.cycleIndex)}
+        />
+        <Scenario3QoSPanel
+          active={profileClock.qosActive}
+          lastUpdated={formatTimeOfDay(profileClock.nowMS)}
+        />
+      </Box>
+    </>
+  )
+})
+
+function Scenario3IntentPanel({
+  latencyText,
+  targetMet,
+  frequency,
+  sizeBytes,
+}: {
+  latencyText: string
+  targetMet: boolean
+  frequency: string
+  sizeBytes: number
+}) {
+  return (
+    <section className="scenario3-feature-card scenario3-intent-card">
+      <div className="scenario3-feature-heading">
+        <span><Camera size={13} aria-hidden="true" /> Latest Intent</span>
+        <strong>Stream</strong>
       </div>
-    </article>
+      <div className="scenario3-feature-focus">
+        <span>Requested target</span>
+        <strong>&lt;100 ms</strong>
+        {!targetMet ? <em>Current {latencyText}</em> : null}
+      </div>
+      <dl className="scenario3-feature-metrics">
+        <div>
+          <dt>Type</dt>
+          <dd>Image</dd>
+        </div>
+        <div>
+          <dt>Size</dt>
+          <dd>{sizeBytes} byte</dd>
+        </div>
+        <div>
+          <dt>Frequency</dt>
+          <dd>{frequency.replace(' image/s', '/s').replace(' images/s', '/s')}</dd>
+        </div>
+        <div>
+          <dt>Expected In</dt>
+          <dd>50 ms</dd>
+        </div>
+        <div>
+          <dt>Required</dt>
+          <dd>&lt;100 ms</dd>
+        </div>
+        <div className="scenario3-usage-metric">
+          <dt>Usage</dt>
+          <dd>Realtime visual recognition</dd>
+        </div>
+      </dl>
+    </section>
+  )
+}
+
+function Scenario3QoSPanel({
+  active,
+  lastUpdated,
+}: {
+  active: boolean
+  lastUpdated: string
+}) {
+  return (
+    <section className={`scenario3-feature-card scenario3-qos-panel ${active ? 'is-active' : 'is-standby'}`}>
+      <div className="scenario3-feature-heading">
+        <span><Gauge size={13} aria-hidden="true" /> QoS Parameter</span>
+        <strong>Grant</strong>
+      </div>
+      <div className="scenario3-qos-state">
+        <Sparkles size={12} aria-hidden="true" />
+        <span>Dynamic QoS</span>
+        <strong className="scenario3-qos-switch">
+          <span className={active ? '' : 'is-visible'}>Baseline</span>
+          <span className={active ? 'is-visible' : ''}>Active</span>
+        </strong>
+      </div>
+      <dl className="scenario3-feature-metrics scenario3-qos-metrics">
+        <div>
+          <dt>GBR / MBR</dt>
+          <dd className="scenario3-qos-switch">
+            <span className={active ? '' : 'is-visible'}>N/A</span>
+            <span className={active ? 'is-visible' : ''}>2 Mbps / 5 Mbps</span>
+          </dd>
+        </div>
+        <div>
+          <dt>Latency Class</dt>
+          <dd className="scenario3-qos-switch">
+            <span className={active ? '' : 'is-visible'}>6QI 9 / PDB 300 ms</span>
+            <span className={active ? 'is-visible' : ''}>6QI 82 / PDB 100 ms</span>
+          </dd>
+        </div>
+        <div>
+          <dt>Flow Mapping</dt>
+          <dd className="scenario3-qos-switch">
+            <span className={active ? '' : 'is-visible'}>QFI 5</span>
+            <span className={active ? 'is-visible' : ''}>QFI 8</span>
+          </dd>
+        </div>
+        <div>
+          <dt>Scheduling</dt>
+          <dd className="scenario3-qos-switch">
+            <span className={active ? '' : 'is-visible'}>Baseline</span>
+            <span className={active ? 'is-visible' : ''}>High</span>
+          </dd>
+        </div>
+        <div>
+          <dt>Last Updated</dt>
+          <dd>{lastUpdated}</dd>
+        </div>
+      </dl>
+    </section>
+  )
+}
+
+function Scenario3TrafficChart({
+  baselineBandwidthMbps,
+  running,
+  qosStarted,
+  nowMS,
+  cycleAnchorMS,
+}: {
+  baselineBandwidthMbps: number
+  running: boolean
+  qosStarted: boolean
+  nowMS: number
+  cycleAnchorMS: number
+}) {
+  const baselineBandwidth = baselineUploadBandwidth(baselineBandwidthMbps)
+  const standby = !running || !qosStarted
+  const series = useMemo(() => seedBandwidthSeries(nowMS, baselineBandwidth, qosStarted, cycleAnchorMS), [baselineBandwidth, cycleAnchorMS, nowMS, qosStarted])
+  const latestWindow = useMemo(() => bandwidthWindowStats(series, baselineBandwidth), [baselineBandwidth, series])
+  const burstActive = !standby && latestWindow.ulPeak > 6
+
+  if (standby) {
+    return (
+      <div className="scenario3-hero-graph is-standby" aria-label="Hero UE uplink and downlink bandwidth standby">
+        <span className="scenario3-chart-standby">Bandwidth standby</span>
+        <span className="scenario3-bandwidth-tag">
+          <strong>UL --</strong>
+          <em>DL --</em>
+        </span>
+      </div>
+    )
+  }
+
+  return (
+    <div className={`scenario3-hero-graph ${burstActive ? 'is-bursting' : ''}`} aria-label="Hero UE uplink and downlink bandwidth">
+      <div className="scenario3-bandwidth-chart" aria-hidden="true">
+        <MeasuredChart>
+          {({ width, height }) => (
+            <LineChart width={width} height={height} data={series} margin={{ top: 10, right: 7, bottom: 6, left: 7 }}>
+              <CartesianGrid horizontal={false} stroke="rgba(148, 163, 184, 0.2)" />
+              <XAxis dataKey="timestamp" type="number" domain={['dataMin', 'dataMax']} hide />
+              <YAxis yAxisId="ul" domain={[0, 10]} hide />
+              <YAxis yAxisId="dl" domain={[0, 2]} orientation="right" hide />
+              <Line yAxisId="dl" type="monotone" dataKey="dl" stroke="#0f766e" strokeWidth={1.7} strokeDasharray="4 5" dot={false} isAnimationActive={false} />
+              <Line yAxisId="ul" type="monotone" dataKey="ul" stroke="#2563eb" strokeWidth={2.6} dot={false} isAnimationActive={false} />
+            </LineChart>
+          )}
+        </MeasuredChart>
+      </div>
+      {burstActive ? <span key={latestWindow.endTimestamp} className="scenario3-upload-pulse" aria-hidden="true" /> : null}
+      <span className="scenario3-bandwidth-tag">
+        <strong>UL {latestWindow.ulPeak.toFixed(1)} Mbps</strong>
+        <em>DL {latestWindow.dlPeak.toFixed(1)} Mbps</em>
+      </span>
+    </div>
   )
 }
 
@@ -1048,7 +1299,6 @@ function Panel({ title, children }: { title: string; children: ReactNode }) {
         <div>
           <h2>{title}</h2>
         </div>
-        <CircleDot size={14} />
       </div>
       {children}
     </section>
@@ -1100,117 +1350,95 @@ function OutcomeRow({ label, value, tone }: { label: string; value: number; tone
   )
 }
 
-function SparkBars({ samples, tall = false }: { samples: number[]; tall?: boolean }) {
-  const displaySamples = samples.slice(-24)
-  const max = Math.max(...displaySamples, 1)
+const CrowdLatencyStrip = memo(function CrowdLatencyStrip({
+  className,
+  samples,
+}: {
+  className: string
+  samples: number[]
+}) {
+  return <LatencyBarsStrip className={className} samples={samples} barCount={8} />
+})
+
+const LatencyBarsStrip = memo(function LatencyBarsStrip({
+  barCount,
+  className,
+  samples,
+}: {
+  barCount: number
+  className: string
+  samples: number[]
+}) {
+  const heights = useMemo(() => latencyBarHeights(samples, barCount), [barCount, samples])
+  const hasData = samples.some((value) => value > 0)
 
   return (
-    <div className={`spark-bars ${tall ? 'is-tall' : ''}`} aria-hidden="true">
-      {Array.from({ length: 24 }).map((_, index) => {
-        const value = displaySamples[index - (24 - displaySamples.length)]
-        const height = value ? Math.max(12, Math.round((value / max) * 100)) : 0
-        return <span key={index} style={{ height: `${height}%` }} />
-      })}
+    <div className={`latency-bars-chart ${className} ${hasData ? 'has-data' : 'is-standby'}`} aria-hidden="true">
+      {heights.map((height, index) => (
+        <span key={index} style={{ height: `${height}%` }} />
+      ))}
     </div>
   )
-}
+})
 
 function LatencyBoxPlotChart({
   width,
   height,
   points,
-  maxUsers,
 }: {
   width: number
   height: number
   points: HistoryPoint[]
-  maxUsers: number
 }) {
-  const [tooltip, setTooltip] = useState<{ left: number; top: number; point: BoxPlotPoint } | null>(null)
-  const margin = { top: 10, right: 42, bottom: 26, left: 34 }
-  const innerWidth = Math.max(1, width - margin.left - margin.right)
-  const innerHeight = Math.max(1, height - margin.top - margin.bottom)
-  const plotPoints = points
-    .map((point) => {
-      const box = boxPlotStats(point.latencies)
-      return box ? { ...point, box } : null
+  const chartRef = useRef<EChartsInstance | null>(null)
+  const chartNodeRef = useRef<HTMLDivElement>(null)
+  const [ready, setReady] = useState(false)
+  const chartPoints = useMemo(() => latencyBoxPoints(points), [points])
+
+  useEffect(() => {
+    let cancelled = false
+
+    Promise.all([
+      import('echarts/core'),
+      import('echarts/charts'),
+      import('echarts/components'),
+      import('echarts/renderers'),
+    ]).then(([echarts, charts, components, renderers]) => {
+      if (cancelled || !chartNodeRef.current) {
+        return
+      }
+      echarts.use([
+        charts.BoxplotChart,
+        charts.ScatterChart,
+        components.GridComponent,
+        components.MarkAreaComponent,
+        components.TooltipComponent,
+        renderers.CanvasRenderer,
+      ])
+      chartRef.current = echarts.init(chartNodeRef.current, null, { renderer: 'canvas' })
+      setReady(true)
     })
-    .filter((point): point is BoxPlotPoint => Boolean(point))
-  const y = (value: number) => margin.top + (1 - clampChartLatency(value) / 1000) * innerHeight
-  const x = (active: number) => margin.left + (active / Math.max(maxUsers, 1)) * innerWidth
-  const yTicks = [0, 150, 300, 600, 1000]
-  const xTicks = activeAxisTicks(maxUsers)
-  const boxWidth = Math.max(10, Math.min(24, (innerWidth / Math.max(plotPoints.length, 1)) * 0.62))
+
+    return () => {
+      cancelled = true
+      chartRef.current?.dispose()
+      chartRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!ready || !chart) {
+      return
+    }
+    chart.resize({ width, height })
+    chart.setOption(makeLatencyBoxOption(chartPoints), true)
+  }, [chartPoints, height, ready, width])
 
   return (
-    <div className="latency-box-plot">
-      <svg width={width} height={height} role="img" aria-label="Latency box plot by active UE count">
-        <rect className="box-band band-critical" x={margin.left} y={y(1000)} width={innerWidth} height={Math.max(0, y(300) - y(1000))} />
-        <rect className="box-band band-degraded" x={margin.left} y={y(300)} width={innerWidth} height={Math.max(0, y(150) - y(300))} />
-        <rect className="box-band band-healthy" x={margin.left} y={y(150)} width={innerWidth} height={Math.max(0, y(0) - y(150))} />
-
-        {yTicks.map((tick) => (
-          <g key={tick}>
-            <line className="box-grid-line" x1={margin.left} x2={margin.left + innerWidth} y1={y(tick)} y2={y(tick)} />
-            <text className="box-axis-label y-label" x={margin.left + innerWidth + 8} y={y(tick) + 3}>{formatLatencyAxis(tick)}</text>
-          </g>
-        ))}
-
-        {xTicks.map((tick) => (
-          <g key={tick}>
-            <line className="box-x-tick" x1={x(tick)} x2={x(tick)} y1={margin.top + innerHeight} y2={margin.top + innerHeight + 4} />
-            <text className="box-axis-label x-label" x={x(tick)} y={margin.top + innerHeight + 17}>{tick}</text>
-          </g>
-        ))}
-
-        <line className="box-axis-line" x1={margin.left} x2={margin.left + innerWidth} y1={margin.top + innerHeight} y2={margin.top + innerHeight} />
-        <line className="box-axis-line" x1={margin.left} x2={margin.left} y1={margin.top} y2={margin.top + innerHeight} />
-
-        {plotPoints.map((point) => {
-          const pointX = x(point.active)
-          const minY = y(point.box.min)
-          const q1Y = y(point.box.q1)
-          const medianY = y(point.box.median)
-          const q3Y = y(point.box.q3)
-          const maxY = y(point.box.max)
-          const boxHeight = Math.max(4, q1Y - q3Y)
-          const boxTop = q1Y - q3Y < 4 ? medianY - boxHeight / 2 : q3Y
-          const boxTone = latencyToneForDistribution(point.box.q3, point.p99)
-          return (
-            <g
-              className={`box-plot-point tone-${boxTone}`}
-              key={`${point.tick}-${point.active}`}
-              onMouseMove={(event) => {
-                const rect = event.currentTarget.ownerSVGElement?.getBoundingClientRect()
-                setTooltip({
-                  left: rect ? event.clientX - rect.left + 12 : pointX + 12,
-                  top: rect ? event.clientY - rect.top + 12 : medianY + 12,
-                  point,
-                })
-              }}
-              onMouseLeave={() => setTooltip(null)}
-            >
-              <line className="box-whisker" x1={pointX} x2={pointX} y1={maxY} y2={minY} />
-              <line className="box-cap" x1={pointX - boxWidth * 0.5} x2={pointX + boxWidth * 0.5} y1={minY} y2={minY} />
-              <line className="box-cap" x1={pointX - boxWidth * 0.5} x2={pointX + boxWidth * 0.5} y1={maxY} y2={maxY} />
-              <rect className="box-iqr" x={pointX - boxWidth / 2} y={boxTop} width={boxWidth} height={boxHeight} rx={2.5} />
-              <line className="box-median" x1={pointX - boxWidth / 2} x2={pointX + boxWidth / 2} y1={medianY} y2={medianY} />
-              {point.failedCount > 0 ? <circle className="box-failed-dot" cx={pointX + boxWidth * 0.62} cy={y(1000) + 8} r={Math.min(5, 2.5 + point.failedCount / 4)} /> : null}
-            </g>
-          )
-        })}
-      </svg>
-      {tooltip ? (
-        <div className="box-tooltip" style={{ left: tooltip.left, top: tooltip.top }}>
-          <strong>{formatActiveLabel(tooltip.point.active)}</strong>
-          <span>Min {formatLatency(tooltip.point.box.min)} / P25 {formatLatency(tooltip.point.box.q1)}</span>
-          <span>Median {formatLatency(tooltip.point.box.median)} / P75 {formatLatency(tooltip.point.box.q3)}</span>
-          <span>Max {formatLatency(tooltip.point.box.max)}</span>
-          <em>
-            Healthy {tooltip.point.goodCount} / Degraded {tooltip.point.degradedCount} / Critical {tooltip.point.highCount} / Failed {tooltip.point.failedCount}
-          </em>
-        </div>
-      ) : null}
+    <div className="latency-echarts-frame" style={{ width, height }}>
+      <div className="latency-echarts" ref={chartNodeRef} />
+      {!chartPoints.length ? <ChartEmpty label="Standby until live latency data arrives" /> : null}
     </div>
   )
 }
@@ -1251,12 +1479,14 @@ function labelForFilter(filter: BoardFilter) {
       return 'All'
     case 'uploading':
       return 'Uploading'
-    case 'prioritized':
-      return 'Prioritized'
-    case 'public':
-      return 'Public'
-    case 'online':
-      return 'Online'
+    case 'temporary':
+      return 'Temporary Grant'
+    case 'healthy':
+      return 'Healthy'
+    case 'delayed':
+      return 'Delayed'
+    case 'critical':
+      return 'Critical'
   }
 }
 
@@ -1283,20 +1513,6 @@ function deviceTypeForUser(user: DemoUser) {
 function recognitionLabelForUser(user: DemoUser) {
   const labels = ['pallet', 'safety vest', 'barcode', 'tool case', 'package']
   return labels[(user.index - 1) % labels.length]
-}
-
-function qosBadgeMeta(user: DemoUser) {
-  if (!isUserOnline(user)) {
-    return { short: 'Wait', label: 'Waiting', tone: 'waiting' }
-  }
-  switch (user.treatment) {
-    case 'reserved':
-      return { short: 'GBR', label: 'GBR QoS flow', tone: 'reserved' }
-    case 'temporary_grant':
-      return { short: 'Temp', label: 'Temporary QoS grant', tone: 'temporary' }
-    default:
-      return { short: 'Non-GBR', label: 'Non-GBR QoS flow', tone: 'public' }
-  }
 }
 
 function aiOutcomeForStatus(status: DemoUserStatus, uploading?: boolean) {
@@ -1338,11 +1554,221 @@ function heroUserForScenario3(state: DemoState | null, resultByID: Record<string
   )
 }
 
-function scenario3BeforeLatency(latencyMS: number) {
-  if (latencyMS <= 0) {
-    return 172
+function imsiForUser(user: DemoUser) {
+  return `310260${String(810000000 + user.index).padStart(9, '0')}`
+}
+
+function intentSizeBytes(seed: number, tick: number) {
+  const wave = Math.sin((tick + seed * 13) * 1.714)
+  const normalized = (wave + 1) / 2
+  return Math.round(1000 + normalized * 4000)
+}
+
+function e2eDelayForUploadDelay(uploadDelayMS: number, seed: number) {
+  const processingDelayMS = 20 + Math.abs(seed * 7) % 11
+  return uploadDelayMS + processingDelayMS
+}
+
+function formatTimeOfDay(timestampMS: number) {
+  return new Date(timestampMS).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
+function heroLatencyTone(latencyMS: number) {
+  if (!Number.isFinite(latencyMS) || latencyMS <= 0) {
+    return 'waiting'
   }
-  return Math.min(280, Math.max(145, latencyMS + 111))
+  if (latencyMS < 100) {
+    return 'healthy'
+  }
+  if (latencyMS < 300) {
+    return 'degraded'
+  }
+  return 'critical'
+}
+
+function baselineUploadBandwidth(publicRateMbps: number) {
+  if (!Number.isFinite(publicRateMbps) || publicRateMbps <= 0) {
+    return 0.8
+  }
+  return Math.max(0.5, Math.min(1, publicRateMbps * 8))
+}
+
+type BandwidthSample = {
+  timestamp: number
+  ul: number
+  dl: number
+}
+
+const BANDWIDTH_SAMPLE_MS = 150
+const BANDWIDTH_SAMPLE_COUNT = 40
+const BANDWIDTH_UPDATE_MS = 700
+const LATENCY_BARS_UPDATE_MS = 1000
+const QOS_CYCLE_MS = 1000
+const QOS_ACTIVE_MS = 500
+const QOS_PROFILE_SWITCH_MS = 700
+const UPLOAD_PEAK_OFFSET_MS = 100
+const UPLOAD_DURATION_MS = 220
+const DL_RESPONSE_DELAY_MS = 140
+const DL_RESPONSE_DURATION_MS = 280
+
+function seedBandwidthSeries(nowMS: number, baselineMbps: number, running: boolean, cycleAnchorMS: number) {
+  return Array.from({ length: BANDWIDTH_SAMPLE_COUNT }, (_, index) => {
+    const timestamp = nowMS - (BANDWIDTH_SAMPLE_COUNT - 1 - index) * BANDWIDTH_SAMPLE_MS
+    return makeBandwidthSample(timestamp, baselineMbps, running, cycleAnchorMS)
+  })
+}
+
+function baselineBandwidthSample(baselineMbps: number): BandwidthSample {
+  return { timestamp: 0, ul: Number(baselineMbps.toFixed(2)), dl: 0.3 }
+}
+
+function bandwidthWindowStats(series: BandwidthSample[], baselineMbps: number) {
+  const fallback = baselineBandwidthSample(baselineMbps)
+  const windowSamples = series.slice(-Math.max(1, Math.ceil(BANDWIDTH_UPDATE_MS / BANDWIDTH_SAMPLE_MS)))
+  const samples = windowSamples.length > 0 ? windowSamples : [fallback]
+  return {
+    ulPeak: Math.max(...samples.map((sample) => sample.ul)),
+    dlPeak: Math.max(...samples.map((sample) => sample.dl)),
+    endTimestamp: samples[samples.length - 1]?.timestamp ?? fallback.timestamp,
+  }
+}
+
+function makeBandwidthSample(timestamp: number, baselineMbps: number, running: boolean, cycleAnchorMS: number): BandwidthSample {
+  if (!running) {
+    return { timestamp, ul: Number(baselineMbps.toFixed(2)), dl: 0.3 }
+  }
+
+  const phaseMS = positiveModulo(timestamp - cycleAnchorMS, QOS_CYCLE_MS)
+  const ul = baselineMbps + (10 - baselineMbps) * uploadPulse(phaseMS)
+  const dl = 0.3 + 1.3 * downlinkPulse(phaseMS)
+  return {
+    timestamp,
+    ul: Number(ul.toFixed(2)),
+    dl: Number(dl.toFixed(2)),
+  }
+}
+
+function uploadPulse(phaseMS: number) {
+  return centeredPulse(phaseMS, UPLOAD_PEAK_OFFSET_MS, UPLOAD_DURATION_MS)
+}
+
+function downlinkPulse(phaseMS: number) {
+  return centeredPulse(phaseMS, UPLOAD_PEAK_OFFSET_MS + DL_RESPONSE_DELAY_MS, DL_RESPONSE_DURATION_MS)
+}
+
+function centeredPulse(phaseMS: number, peakOffsetMS: number, durationMS: number) {
+  const distance = Math.abs(phaseMS - peakOffsetMS)
+  const halfDuration = durationMS / 2
+  if (distance > halfDuration) {
+    return 0
+  }
+  return Math.cos((distance / halfDuration) * (Math.PI / 2))
+}
+
+function positiveModulo(value: number, modulus: number) {
+  return ((value % modulus) + modulus) % modulus
+}
+
+function useQosCycleClock(running: boolean, updateMS: number) {
+  const [clock, setClock] = useState(() => {
+    const nowMS = Date.now()
+    return { nowMS, cycleAnchorMS: nowMS, hasRun: false }
+  })
+
+  useEffect(() => {
+    if (!running) {
+      return
+    }
+
+    function updateClock() {
+      const nowMS = Date.now()
+      setClock((current) => ({
+        nowMS,
+        cycleAnchorMS: current.hasRun ? current.cycleAnchorMS : nowMS,
+        hasRun: true,
+      }))
+    }
+
+    updateClock()
+    const timer = window.setInterval(updateClock, updateMS)
+    return () => window.clearInterval(timer)
+  }, [running, updateMS])
+
+  const phaseMS = positiveModulo(clock.nowMS - clock.cycleAnchorMS, QOS_CYCLE_MS)
+
+  return {
+    nowMS: clock.nowMS,
+    cycleAnchorMS: clock.cycleAnchorMS,
+    hasRun: clock.hasRun,
+    phaseMS,
+    cycleIndex: Math.floor((clock.nowMS - clock.cycleAnchorMS) / QOS_CYCLE_MS),
+    qosActive: running && clock.hasRun && phaseMS < QOS_ACTIVE_MS,
+  }
+}
+
+function useQosProfileClock(running: boolean) {
+  const [clock, setClock] = useState(() => {
+    const nowMS = Date.now()
+    return { nowMS, cycleAnchorMS: nowMS, hasRun: false, switchIndex: 0 }
+  })
+
+  useEffect(() => {
+    if (!running) {
+      return
+    }
+
+    const cycleAnchorMS = Date.now()
+    let timer: number | undefined
+
+    function updateAtBoundary() {
+      const nowMS = Date.now()
+      const elapsedMS = Math.max(0, nowMS - cycleAnchorMS)
+      const switchIndex = Math.floor(elapsedMS / QOS_PROFILE_SWITCH_MS)
+      const delayMS = Math.max(32, QOS_PROFILE_SWITCH_MS - (elapsedMS % QOS_PROFILE_SWITCH_MS) + 4)
+
+      setClock({ nowMS, cycleAnchorMS, hasRun: true, switchIndex })
+      timer = window.setTimeout(updateAtBoundary, delayMS)
+    }
+
+    updateAtBoundary()
+    return () => {
+      if (timer !== undefined) {
+        window.clearTimeout(timer)
+      }
+    }
+  }, [running])
+
+  return {
+    nowMS: clock.nowMS,
+    cycleIndex: Math.floor((clock.nowMS - clock.cycleAnchorMS) / QOS_CYCLE_MS),
+    qosActive: running && clock.hasRun && clock.switchIndex % 2 === 0,
+  }
+}
+
+function useThrottledValue<T>(value: T, intervalMS: number) {
+  const latestRef = useRef(value)
+  const [throttled, setThrottled] = useState(value)
+
+  useEffect(() => {
+    latestRef.current = value
+  }, [value])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setThrottled((current) => (Object.is(current, latestRef.current) ? current : latestRef.current))
+    }, intervalMS)
+    return () => window.clearInterval(timer)
+  }, [intervalMS])
+
+  return throttled
+}
+
+function formatUploadFrequency(intervalMS: number) {
+  if (intervalMS <= 0) {
+    return 'continuous'
+  }
+  const uploadsPerSecond = 1000 / intervalMS
+  return uploadsPerSecond === 1 ? '1 image/s' : `${uploadsPerSecond.toFixed(1)} images/s`
 }
 
 function formatMbps(value: number) {
@@ -1370,27 +1796,6 @@ function formatLatencyAxis(value: number) {
   return value >= 1000 ? '1000ms+' : `${value}ms`
 }
 
-function latencyToneForP75(latencyMS: number) {
-  if (latencyMS >= 900) {
-    return 'failed'
-  }
-  if (latencyMS <= 150) {
-    return 'healthy'
-  }
-  if (latencyMS <= 300) {
-    return 'degraded'
-  }
-  return 'critical'
-}
-
-function latencyToneForDistribution(p75MS: number, p99MS: number) {
-  const p75Tone = latencyToneForP75(p75MS)
-  if (p75Tone === 'healthy' && p99MS > 150) {
-    return 'degraded'
-  }
-  return p75Tone
-}
-
 function formatActiveAxis(value: number) {
   if (!Number.isFinite(value)) {
     return ''
@@ -1403,6 +1808,158 @@ function formatActiveLabel(value: number) {
     return ''
   }
   return `${value.toFixed(0)} active UEs`
+}
+
+function latencyBoxPoints(points: HistoryPoint[]): LatencyBoxPoint[] {
+  return points
+    .map((point) => {
+      const box = boxPlotStats(point.latencies)
+      if (!box) {
+        return null
+      }
+      return {
+        active: point.active,
+        failedCount: point.failedCount,
+        max: box.max,
+        median: box.median,
+        min: box.min,
+        q1: box.q1,
+        q3: box.q3,
+      }
+    })
+    .filter((point): point is LatencyBoxPoint => Boolean(point))
+}
+
+function makeLatencyBoxOption(points: LatencyBoxPoint[]) {
+  const categories = points.map((point) => String(point.active))
+
+  return {
+    animation: false,
+    backgroundColor: 'transparent',
+    grid: { top: 12, right: 48, bottom: 28, left: 36 },
+    tooltip: {
+      borderColor: '#dce3ef',
+      borderRadius: 8,
+      backgroundColor: 'rgba(255, 255, 255, 0.96)',
+      confine: true,
+      padding: 8,
+      textStyle: { color: '#101828', fontSize: 12 },
+      trigger: 'item',
+      formatter: (params: unknown) => formatLatencyDistributionTooltip(params),
+    },
+    xAxis: {
+      type: 'category',
+      data: categories,
+      axisLine: { lineStyle: { color: '#dce3ef' } },
+      axisLabel: {
+        color: '#667085',
+        fontSize: 10,
+        interval: Math.max(0, Math.ceil(categories.length / 12) - 1),
+      },
+      axisTick: { show: false },
+      splitLine: { lineStyle: { color: 'rgba(220, 226, 236, 0.42)' }, show: true },
+    },
+    yAxis: {
+      type: 'value',
+      min: 0,
+      max: 1000,
+      interval: 150,
+      axisLine: { lineStyle: { color: '#dce3ef' } },
+      axisLabel: {
+        color: '#667085',
+        fontSize: 10,
+        formatter: (value: number) => formatLatencyAxis(value),
+      },
+      axisTick: { show: false },
+      position: 'right',
+      splitLine: { lineStyle: { color: 'rgba(203, 213, 225, 0.52)', type: [3, 5] } },
+    },
+    series: [
+      {
+        name: 'P25-P75',
+        type: 'boxplot',
+        data: points.map((point) => ({
+          active: point.active,
+          failedCount: point.failedCount,
+          value: [point.min, point.q1, point.median, point.q3, point.max],
+        })),
+        itemStyle: {
+          borderColor: '#1d4ed8',
+          borderWidth: 1.5,
+          color: {
+            type: 'linear' as const,
+            x: 0,
+            y: 0,
+            x2: 0,
+            y2: 1,
+            colorStops: [
+              { offset: 0, color: '#bfdbfe' },
+              { offset: 1, color: '#eff6ff' },
+            ],
+          },
+          shadowBlur: 7,
+          shadowColor: 'rgba(37, 99, 235, 0.16)',
+          shadowOffsetY: 2,
+        },
+        markArea: {
+          silent: true,
+          data: [
+            [{ yAxis: 300, itemStyle: { color: 'rgba(255, 237, 213, 0.36)' } }, { yAxis: 1000 }],
+            [{ yAxis: 150, itemStyle: { color: 'rgba(254, 243, 199, 0.34)' } }, { yAxis: 300 }],
+            [{ yAxis: 0, itemStyle: { color: 'rgba(209, 250, 229, 0.3)' } }, { yAxis: 150 }],
+          ],
+        },
+        medianStyle: {
+          color: '#7c3aed',
+          width: 2,
+        },
+      },
+      {
+        name: 'Failed',
+        type: 'scatter',
+        data: points
+          .filter((point) => point.failedCount > 0)
+          .map((point) => ({
+            active: point.active,
+            failedCount: point.failedCount,
+            value: [String(point.active), 1000],
+          })),
+        itemStyle: {
+          color: '#dc2626',
+          borderColor: '#fff',
+          borderWidth: 1.4,
+          shadowBlur: 6,
+          shadowColor: 'rgba(220, 38, 38, 0.35)',
+        },
+        symbolSize: 7,
+      },
+    ],
+  }
+}
+
+function formatLatencyDistributionTooltip(params: unknown) {
+  const payload = isRecord(params) ? params : {}
+  const data = isRecord(payload.data) ? payload.data : {}
+  const marker = typeof payload.marker === 'string' ? payload.marker : ''
+  const active = typeof data.active === 'number' ? data.active : Number.NaN
+
+  if (payload.seriesType === 'scatter') {
+    const failedCount = typeof data.failedCount === 'number' ? data.failedCount : 0
+    return `${marker}<strong>${formatActiveLabel(active)}</strong><br/>Failed ${failedCount} UEs`
+  }
+
+  const values = Array.isArray(data.value) ? data.value.map((value) => Number(value)) : []
+  const [min, q1, median, q3, max] = values
+  return [
+    `${marker}<strong>${formatActiveLabel(active)}</strong>`,
+    `Min ${formatLatency(min)} / P25 ${formatLatency(q1)}`,
+    `Median ${formatLatency(median)} / P75 ${formatLatency(q3)}`,
+    `Max ${formatLatency(max)}`,
+  ].join('<br/>')
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object')
 }
 
 function compactHistoryByActive(points: HistoryPoint[]) {
@@ -1613,63 +2170,85 @@ function treatmentCounts(users: DemoUser[]) {
   )
 }
 
-function filterUsers(users: DemoUser[], filter: BoardFilter) {
+function makeDeviceCardView(user: DemoUser, latestResult: UploadResult | undefined, latencyHistory: number[]): DeviceCardView {
+  const online = isUserOnline(user)
+  const displayStatus = displayStatusForUser(user, latestResult)
+  const displayLatencyMS = latestResult?.latency_ms ?? user.last_latency_ms ?? 0
+  const treatmentClass = user.treatment === 'temporary_grant' ? 'treatment-temporary' : user.treatment === 'reserved' ? 'treatment-reserved' : 'treatment-public'
+  const label = ueShortLabel(user)
+  const outcome = aiOutcomeForStatus(displayStatus, user.uploading)
+  const latencyText = displayLatencyMS > 0 ? formatLatency(displayLatencyMS) : online ? 'Waiting' : '--'
+
+  return {
+    user,
+    label,
+    online,
+    displayStatus,
+    displayLatencyMS,
+    treatmentClass,
+    outcome,
+    latencyText,
+    accessibleLabel: `${label}, ${outcome.label}, ${latencyText}, Dynamic QoS`,
+    latencyHistory,
+  }
+}
+
+function filterDeviceCards(cards: DeviceCardView[], filter: BoardFilter) {
   switch (filter) {
     case 'uploading':
-      return users.filter((user) => user.active && (user.uploading || user.running))
-    case 'prioritized':
-      return users.filter((user) => user.active && user.treatment !== 'public')
-    case 'public':
-      return users.filter((user) => user.active && user.treatment === 'public')
-    case 'online':
-      return users.filter(isUserOnline)
+      return cards.filter((card) => card.user.active && (card.user.uploading || card.user.running))
+    case 'temporary':
+      return cards.filter((card) => card.user.active && card.user.treatment === 'temporary_grant')
+    case 'healthy':
+      return cards.filter((card) => card.displayStatus === 'good')
+    case 'delayed':
+      return cards.filter((card) => card.displayStatus === 'delayed')
+    case 'critical':
+      return cards.filter((card) => card.displayStatus === 'high' || card.displayStatus === 'failed')
     case 'all':
     default:
-      return users
+      return cards
   }
 }
 
-function boardFilterCounts(users: DemoUser[]): Record<BoardFilter, number> {
+function boardFilterCounts(cards: DeviceCardView[]): Record<BoardFilter, number> {
   return {
-    all: users.length,
-    uploading: users.filter((user) => user.active && (user.uploading || user.running)).length,
-    prioritized: users.filter((user) => user.active && user.treatment !== 'public').length,
-    public: users.filter((user) => user.active && user.treatment === 'public').length,
-    online: users.filter(isUserOnline).length,
+    all: cards.length,
+    uploading: cards.filter((card) => card.user.active && (card.user.uploading || card.user.running)).length,
+    temporary: cards.filter((card) => card.user.active && card.user.treatment === 'temporary_grant').length,
+    healthy: cards.filter((card) => card.displayStatus === 'good').length,
+    delayed: cards.filter((card) => card.displayStatus === 'delayed').length,
+    critical: cards.filter((card) => card.displayStatus === 'high' || card.displayStatus === 'failed').length,
   }
 }
 
-function sortUsers(users: DemoUser[], sortMode: BoardSort, resultByID: Record<string, UploadResult>) {
-  const next = [...users]
+function displayStatusForUser(user: DemoUser, latestResult?: UploadResult): DemoUserStatus {
+  if (latestResult) {
+    return classifyResultStatus(latestResult)
+  }
+  if (isUserOnline(user) && user.status === 'planned') {
+    return 'idle'
+  }
+  return user.status
+}
+
+function sortDeviceCards(cards: DeviceCardView[], sortMode: BoardSort) {
+  const next = [...cards]
   next.sort((left, right) => {
     let result = 0
     if (sortMode === 'latency') {
-      result = latestLatency(right, resultByID) - latestLatency(left, resultByID)
+      result = right.displayLatencyMS - left.displayLatencyMS
     } else if (sortMode === 'status') {
-      result = statusRank(right, resultByID) - statusRank(left, resultByID)
+      result = statusRank(right.displayStatus) - statusRank(left.displayStatus)
     } else {
-      result = left.index - right.index
+      result = left.user.index - right.user.index
     }
-    return result || left.index - right.index
+    return result || left.user.index - right.user.index
   })
   return next
 }
 
-function latestLatency(user: DemoUser, resultByID: Record<string, UploadResult>) {
-  return resultByID[user.client_id]?.latency_ms ?? user.last_latency_ms ?? 0
-}
-
-function hashToUnit(value: string) {
-  let hash = 2166136261
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index)
-    hash = Math.imul(hash, 16777619)
-  }
-  return (hash >>> 0) / 4294967295
-}
-
-function statusRank(user: DemoUser, resultByID: Record<string, UploadResult>) {
-  const status = resultByID[user.client_id] ? classifyResultStatus(resultByID[user.client_id]) : user.status
+function statusRank(status: DemoUserStatus) {
   switch (status) {
     case 'failed':
       return 6
@@ -1700,45 +2279,6 @@ function classifyResultStatus(result: UploadResult): DemoUserStatus {
     return 'delayed'
   }
   return 'high'
-}
-
-function ringPathLength(status: DemoUserStatus) {
-  switch (status) {
-    case 'good':
-      return 0.86
-    case 'delayed':
-      return 0.62
-    case 'high':
-      return 0.78
-    case 'failed':
-      return 0.92
-    case 'running':
-      return 0.72
-    case 'idle':
-      return 0.34
-    case 'planned':
-    default:
-      return 0.1
-  }
-}
-
-function statusColor(status: DemoUserStatus) {
-  switch (status) {
-    case 'good':
-      return '#24a148'
-    case 'delayed':
-      return '#f59e0b'
-    case 'high':
-      return '#f97316'
-    case 'failed':
-      return '#dc2626'
-    case 'running':
-      return '#2563eb'
-    case 'idle':
-    case 'planned':
-    default:
-      return '#9ca3af'
-  }
 }
 
 function scenarioStyle(strategy: StrategyName) {
