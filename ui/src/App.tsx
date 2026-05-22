@@ -14,6 +14,7 @@ import {
   RotateCcw,
   Shield,
   Sparkles,
+  SlidersHorizontal,
   StopCircle,
 } from 'lucide-react'
 import {
@@ -36,9 +37,31 @@ import {
   YAxis,
 } from 'recharts'
 import type { DemoStreamStatus } from './api'
-import type { DemoState, DemoStreamEvent, DemoUser, DemoUserStatus, StrategyName, UploadResult } from './types'
-import scenario3HeroImage from './assets/scenario3-robot-street-view.webp'
+import type { DemoRuntimeMode, DemoState, DemoStreamEvent, DemoUser, DemoUserStatus, StrategyName, UploadResult } from './types'
+import robotDogFrame01 from './assets/robot-dog-2/1.webp'
+import robotDogFrame02 from './assets/robot-dog-2/2.webp'
+import robotDogFrame03 from './assets/robot-dog-2/3.webp'
+import robotDogFrame04 from './assets/robot-dog-2/4.webp'
+import robotDogFrame05 from './assets/robot-dog-2/5.webp'
+import robotDogFrame06 from './assets/robot-dog-2/6.webp'
+import robotDogFrame07 from './assets/robot-dog-2/7.webp'
+import robotDogFrame08 from './assets/robot-dog-2/8.webp'
+import robotDogFrame09 from './assets/robot-dog-2/9.webp'
+import robotDogFrame10 from './assets/robot-dog-2/10.webp'
 import './App.css'
+
+const scenario3RobotDogFrames = [
+  robotDogFrame01,
+  robotDogFrame02,
+  robotDogFrame03,
+  robotDogFrame04,
+  robotDogFrame05,
+  robotDogFrame06,
+  robotDogFrame07,
+  robotDogFrame08,
+  robotDogFrame09,
+  robotDogFrame10,
+]
 
 const strategies: Array<{ label: string; value: StrategyName; short: string; tone: 'blue' | 'orange' | 'purple' }> = [
   { label: 'No Optimization', value: 'no_optimization', short: 'All public', tone: 'orange' },
@@ -158,12 +181,12 @@ function App() {
       <motion.div className="page-frame" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.28 }}>
         <DashboardHeader
           state={liveState.state}
-          loading={liveState.loading}
           pending={liveState.pending}
+          runtimeMode={liveState.runtimeMode}
           onRun={liveState.startRun}
           onStop={liveState.stopRun}
           onReset={liveState.resetRun}
-          onRefresh={liveState.refreshState}
+          onRuntimeModeChange={liveState.switchRuntimeMode}
         />
 
         <AnimatePresence>
@@ -201,6 +224,7 @@ function useDemoLiveState() {
   const [streamStatus, setStreamStatus] = useState<DemoStreamStatus>('connecting')
   const [pending, setPending] = useState<PendingActions>(initialPendingState)
   const [pendingStrategy, setPendingStrategy] = useState<StrategyName | null>(null)
+  const [runtimeMode, setRuntimeMode] = useState<DemoRuntimeMode>('real')
   const [liveResults, setLiveResults] = useState<LiveResultState>(() => emptyLiveResultState())
   const [historyPoints, setHistoryPoints] = useState<HistoryPoint[]>([])
   const recordedAttemptsRef = useRef<Record<string, number>>({})
@@ -231,6 +255,7 @@ function useDemoLiveState() {
 
     stateRef.current = nextState
     setState(nextState)
+    setRuntimeMode(nextState.runtime_mode)
 
     if (nextState.running || nextState.counters.active_users > 0 || nextState.users.length > 0) {
       setHistoryPoints((current) => appendHistoryPoint(current, makeHistoryPoint(nextState, current.length)))
@@ -252,7 +277,7 @@ function useDemoLiveState() {
     resetSandboxState()
 
     try {
-      const preparedState = await prepareDemoSession(strategy)
+      const preparedState = await prepareDemoSession(strategy, runtimeMode)
       applyState(preparedState)
       const startedState = await startDemoRun()
       applyState(startedState)
@@ -260,6 +285,25 @@ function useDemoLiveState() {
       setError(err instanceof Error ? err.message : 'Failed to switch demo mode')
     } finally {
       setPendingStrategy(null)
+      setActionPending('mode', false)
+    }
+  }
+
+  async function switchRuntimeMode(nextRuntimeMode: DemoRuntimeMode) {
+    if (pending.mode || state?.running || nextRuntimeMode === runtimeMode) {
+      return
+    }
+
+    setActionPending('mode', true)
+    setError(null)
+    resetSandboxState()
+
+    try {
+      const preparedState = await prepareDemoSession(state?.strategy ?? 'no_optimization', nextRuntimeMode)
+      applyState(preparedState)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to switch runtime mode')
+    } finally {
       setActionPending('mode', false)
     }
   }
@@ -388,7 +432,9 @@ function useDemoLiveState() {
     state,
     streamStatus,
     pendingStrategy,
+    runtimeMode,
     switchMode,
+    switchRuntimeMode,
     startRun: () => runAction('run', startDemoRun, 'Failed to start demo run'),
     stopRun: () => runAction('stop', stopDemoRun, 'Failed to stop demo run'),
     resetRun: () => runAction('reset', resetDemoRun, 'Failed to reset demo run'),
@@ -398,22 +444,23 @@ function useDemoLiveState() {
 
 function DashboardHeader({
   state,
-  loading,
   pending,
+  runtimeMode,
   onRun,
   onStop,
   onReset,
-  onRefresh,
+  onRuntimeModeChange,
 }: {
   state: DemoState | null
-  loading: boolean
   pending: PendingActions
+  runtimeMode: DemoRuntimeMode
   onRun: () => Promise<void>
   onStop: () => Promise<void>
   onReset: () => Promise<void>
-  onRefresh: () => Promise<void>
+  onRuntimeModeChange: (runtimeMode: DemoRuntimeMode) => Promise<void>
 }) {
   const controlsLocked = pending.mode || pending.run || pending.stop || pending.reset
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   return (
     <header className="dashboard-header">
@@ -432,7 +479,24 @@ function DashboardHeader({
           <ActionButton label="Start" pendingLabel="Starting" onClick={onRun} disabled={!state || Boolean(state.running) || controlsLocked} pending={pending.run} icon={<Play size={14} />} primary />
           <ActionButton label="Stop" pendingLabel="Stopping" onClick={onStop} disabled={!state?.running || controlsLocked} pending={pending.stop} icon={<StopCircle size={14} />} danger />
           <ActionButton label="Reset" pendingLabel="Resetting" onClick={onReset} disabled={!state || controlsLocked} pending={pending.reset} icon={<RotateCcw size={14} />} />
-          <ActionButton label={loading ? 'Syncing' : 'Refresh'} pendingLabel="Refreshing" onClick={onRefresh} disabled={pending.refresh || pending.mode} pending={pending.refresh} icon={<RefreshCcw size={14} />} iconOnly />
+          <div className="header-settings-wrap">
+            <ActionButton
+              label="Settings"
+              pendingLabel="Settings"
+              onClick={async () => setSettingsOpen((open) => !open)}
+              disabled={pending.mode}
+              icon={<SlidersHorizontal size={14} />}
+              iconOnly
+            />
+            {settingsOpen ? (
+              <RuntimeSettingsPanel
+                runtimeMode={runtimeMode}
+                running={Boolean(state?.running)}
+                pending={pending.mode}
+                onRuntimeModeChange={onRuntimeModeChange}
+              />
+            ) : null}
+          </div>
         </div>
       </div>
     </header>
@@ -530,9 +594,9 @@ function StrategyComparison({
             disabled={pending}
             onClick={() => void onModeSelect(strategy.value)}
           >
-          <div className="comparison-head">
-            <span className="comparison-radio" aria-hidden="true" />
-            <div className="comparison-icon">{scenario.icon}</div>
+            <div className="comparison-head">
+              <span className="comparison-radio" aria-hidden="true" />
+              <div className="comparison-icon">{scenario.icon}</div>
               <h3>{strategy.label}</h3>
               {isSwitching ? <span className="active-badge">Switching</span> : isApplied ? <span className="active-badge">Active</span> : null}
             </div>
@@ -556,6 +620,43 @@ function StrategyComparison({
         )
       })}
     </section>
+  )
+}
+
+function RuntimeSettingsPanel({
+  runtimeMode,
+  running,
+  pending,
+  onRuntimeModeChange,
+}: {
+  runtimeMode: DemoRuntimeMode
+  running: boolean
+  pending: boolean
+  onRuntimeModeChange: (runtimeMode: DemoRuntimeMode) => Promise<void>
+}) {
+  return (
+    <aside className="runtime-settings-card" aria-label="Runtime settings">
+      <div className="runtime-settings-head">
+        <SlidersHorizontal size={15} />
+        <span>Settings</span>
+      </div>
+      <div className="runtime-toggle" role="radiogroup" aria-label="Runtime mode">
+        {(['real', 'playback'] as const).map((mode) => (
+          <button
+            key={mode}
+            type="button"
+            role="radio"
+            aria-checked={runtimeMode === mode}
+            className={runtimeMode === mode ? 'is-selected' : ''}
+            disabled={running || pending}
+            onClick={() => void onRuntimeModeChange(mode)}
+          >
+            {mode === 'real' ? 'Real UEs' : 'Playback'}
+          </button>
+        ))}
+      </div>
+      <p>{runtimeMode === 'playback' ? 'Generated curated data. No namespaces or UE processes.' : 'Real namespaces, tc profiles, and UE upload clients.'}</p>
+    </aside>
   )
 }
 
@@ -974,6 +1075,8 @@ function ScenarioHeroCard({
   latestResult?: UploadResult
   latencyHistory: number[]
 }) {
+  const imageFrameIndex = useImageSequenceFrame(scenario3RobotDogFrames.length, Boolean(state?.running), 300)
+
   if (!state) {
     return null
   }
@@ -990,12 +1093,12 @@ function ScenarioHeroCard({
   const uploadDelay = latestResult?.latency_ms ?? hero.last_latency_ms ?? 0
   const displayStatus = latestResult ? classifyResultStatus(latestResult) : hero.uploading ? 'running' : hero.status
   const outcome = aiOutcomeForStatus(displayStatus, hero.uploading)
-  const recognized = recognitionLabelForUser(hero)
   const latencyText = uploadDelay > 0 ? formatLatency(uploadDelay) : 'Waiting'
   const targetMet = latestResult?.success === true && uploadDelay > 0 && uploadDelay < 100
   const heroProfile = heroProfileForStrategy(state.strategy)
-  const resultLabel = latestResult?.success ? `${recognized} recognized` : 'Waiting for result'
+  const resultLabel = latestResult?.success ? 'Threat level: Low' : 'Waiting for result'
   const e2eDelayText = uploadDelay > 0 ? formatLatency(e2eDelayForUploadDelay(uploadDelay, hero.index + hero.attempts)) : '--'
+  const heroImageSrc = scenario3RobotDogFrames[imageFrameIndex] ?? scenario3RobotDogFrames[0]
 
   return (
     <Card className={`scenario3-hero-card outcome-${outcome.tone}`} variant="outlined">
@@ -1023,6 +1126,18 @@ function ScenarioHeroCard({
           </div>
         </div>
 
+        <Box className="scenario3-latest-image">
+          <div className="scenario3-image-caption">
+            <span>Latest Image</span>
+            <strong>{resultLabel}</strong>
+          </div>
+          <Box component="img" src={heroImageSrc} alt="" aria-hidden="true" />
+          <div className="scenario3-e2e-delay">
+            <span>E2E delay</span>
+            <strong>{e2eDelayText}</strong>
+          </div>
+        </Box>
+
         <Box className={`scenario3-latency-section tone-${heroLatencyTone(uploadDelay)}`} aria-label="Image upload latency section">
           <div className="scenario3-latency-block">
             <span><ImageUp size={13} aria-hidden="true" /> IMAGE UPLOAD LATENCY</span>
@@ -1031,7 +1146,7 @@ function ScenarioHeroCard({
           </div>
           <div className="scenario3-latency-details">
             <span>{deviceTypeForUser(hero)}</span>
-            <strong>AI image recognition · {formatUploadFrequency(state.scenario.interval_ms)}</strong>
+            <strong>realtime AI image assessment</strong>
           </div>
           <div className="scenario3-latency-spark" aria-hidden="true">
             <LatencyBarsStrip className={`hero-latency-bars tone-${heroLatencyTone(uploadDelay)}`} samples={latencyHistory} barCount={12} />
@@ -1041,25 +1156,12 @@ function ScenarioHeroCard({
         <ScenarioHeroPanels
           key={`${state.strategy}:${state.running ? 'running' : 'idle'}`}
           baselineBandwidthMbps={state.bandwidth.public_rate_mbps}
-          frequency={formatUploadFrequency(state.scenario.interval_ms)}
           intentSeed={hero.index + hero.attempts}
           latencyText={latencyText}
           running={Boolean(state.running)}
           strategy={state.strategy}
           targetMet={targetMet}
         />
-
-        <Box className="scenario3-latest-image">
-          <div className="scenario3-image-caption">
-            <span>Latest Image</span>
-            <strong>{resultLabel}</strong>
-          </div>
-          <Box component="img" src={scenario3HeroImage} alt="" aria-hidden="true" />
-          <div className="scenario3-e2e-delay">
-            <span>E2E delay</span>
-            <strong>{e2eDelayText}</strong>
-          </div>
-        </Box>
       </CardContent>
     </Card>
   )
@@ -1067,7 +1169,6 @@ function ScenarioHeroCard({
 
 const ScenarioHeroPanels = memo(function ScenarioHeroPanels({
   baselineBandwidthMbps,
-  frequency,
   intentSeed,
   latencyText,
   running,
@@ -1075,7 +1176,6 @@ const ScenarioHeroPanels = memo(function ScenarioHeroPanels({
   targetMet,
 }: {
   baselineBandwidthMbps: number
-  frequency: string
   intentSeed: number
   latencyText: string
   running: boolean
@@ -1102,7 +1202,6 @@ const ScenarioHeroPanels = memo(function ScenarioHeroPanels({
           <Scenario3IntentPanel
             latencyText={latencyText}
             targetMet={targetMet}
-            frequency={frequency}
             sizeBytes={intentSizeBytes(intentSeed, profileClock.cycleIndex)}
           />
         ) : null}
@@ -1120,12 +1219,10 @@ const ScenarioHeroPanels = memo(function ScenarioHeroPanels({
 function Scenario3IntentPanel({
   latencyText,
   targetMet,
-  frequency,
   sizeBytes,
 }: {
   latencyText: string
   targetMet: boolean
-  frequency: string
   sizeBytes: number
 }) {
   return (
@@ -1149,16 +1246,12 @@ function Scenario3IntentPanel({
           <dd>{sizeBytes} byte</dd>
         </div>
         <div>
-          <dt>Frequency</dt>
-          <dd>{frequency.replace(' image/s', '/s').replace(' images/s', '/s')}</dd>
+          <dt>Flow ID</dt>
+          <dd>7da29w6</dd>
         </div>
         <div>
           <dt>Expected In</dt>
           <dd>50 ms</dd>
-        </div>
-        <div>
-          <dt>Required</dt>
-          <dd>&lt;100 ms</dd>
         </div>
         <div className="scenario3-usage-metric">
           <dt>Usage</dt>
@@ -1211,10 +1304,6 @@ function ScenarioQoSPanel({
         <div>
           <dt>Flow Mapping</dt>
           <dd>{dynamic ? (active ? 'QFI 8' : 'QFI 5') : profile.flow}</dd>
-        </div>
-        <div>
-          <dt>Scheduling</dt>
-          <dd>{dynamic ? (active ? 'High' : 'Baseline') : profile.scheduling}</dd>
         </div>
         <div>
           <dt>Last Updated</dt>
@@ -1622,11 +1711,6 @@ function deviceTypeForUser(user: DemoUser) {
   return devices[(user.index - 1) % devices.length]
 }
 
-function recognitionLabelForUser(user: DemoUser) {
-  const labels = ['pallet', 'safety vest', 'barcode', 'tool case', 'package']
-  return labels[(user.index - 1) % labels.length]
-}
-
 function aiOutcomeForStatus(status: DemoUserStatus, uploading?: boolean) {
   if (uploading && status === 'running') {
     return { label: 'Uploading', tone: 'running' }
@@ -1972,12 +2056,22 @@ function useThrottledValue<T>(value: T, intervalMS: number) {
   return throttled
 }
 
-function formatUploadFrequency(intervalMS: number) {
-  if (intervalMS <= 0) {
-    return 'continuous'
-  }
-  const uploadsPerSecond = 1000 / intervalMS
-  return uploadsPerSecond === 1 ? '1 image/s' : `${uploadsPerSecond.toFixed(1)} images/s`
+function useImageSequenceFrame(frameCount: number, running: boolean, intervalMS: number) {
+  const [frameIndex, setFrameIndex] = useState(0)
+
+  useEffect(() => {
+    if (!running || frameCount <= 1) {
+      return
+    }
+
+    const timer = window.setInterval(() => {
+      setFrameIndex((current) => (current + 1) % frameCount)
+    }, intervalMS)
+
+    return () => window.clearInterval(timer)
+  }, [frameCount, intervalMS, running])
+
+  return running && frameCount > 0 ? frameIndex % frameCount : 0
 }
 
 function formatMbps(value: number) {

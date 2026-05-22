@@ -184,6 +184,94 @@ func TestHandleDemoStateMissingSession(t *testing.T) {
 	}
 }
 
+func TestHandleDemoSessionPlaybackMode(t *testing.T) {
+	mgr := newScenarioManager("/tmp/mock-ue")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/demo/session", strings.NewReader(`{"strategy":"dynamic_qos","runtime_mode":"playback"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mgr.handleDemoSession(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("session status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	var state DemoStateResponse
+	if err := json.NewDecoder(rec.Body).Decode(&state); err != nil {
+		t.Fatalf("decode session response: %v", err)
+	}
+	if state.RuntimeMode != DemoRuntimePlayback {
+		t.Fatalf("runtime_mode = %q, want %q", state.RuntimeMode, DemoRuntimePlayback)
+	}
+}
+
+func TestHandleDemoRunStartPlaybackBypassesRealRuntime(t *testing.T) {
+	mgr := newScenarioManager("/tmp/mock-ue")
+	session := newDemoSession(StrategyDynamicQoS)
+	session.RuntimeMode = DemoRuntimePlayback
+	mgr.demo = &session
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/demo/run/start", nil)
+	rec := httptest.NewRecorder()
+	mgr.handleDemoRunStart(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("start status = %d, want 202: %s", rec.Code, rec.Body.String())
+	}
+
+	var state DemoStateResponse
+	if err := json.NewDecoder(rec.Body).Decode(&state); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+	if !state.Running {
+		t.Fatalf("running = false, want true")
+	}
+	if state.RuntimeMode != DemoRuntimePlayback {
+		t.Fatalf("runtime_mode = %q, want %q", state.RuntimeMode, DemoRuntimePlayback)
+	}
+
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if mgr.server != nil || mgr.runtime != nil {
+		t.Fatalf("playback created real runtime: server=%v runtime=%v", mgr.server != nil, mgr.runtime != nil)
+	}
+	if mgr.demoPlay == nil {
+		t.Fatalf("demoPlay = nil, want active playback runtime")
+	}
+	if err := mgr.stopLocked(); err != nil {
+		t.Fatalf("stop playback: %v", err)
+	}
+}
+
+func TestPlaybackResultGenerationActivatesUsers(t *testing.T) {
+	mgr := newScenarioManager("/tmp/mock-ue")
+	session := newDemoSession(StrategyDynamicQoS)
+	session.RuntimeMode = DemoRuntimePlayback
+	mgr.demo = &session
+	mgr.metrics.reset(session.Config)
+
+	activated, err := mgr.activatePlaybackUsersLocked(5)
+	if err != nil {
+		t.Fatalf("activate playback users: %v", err)
+	}
+	if activated != 5 {
+		t.Fatalf("activated = %d, want 5", activated)
+	}
+
+	items := mgr.playbackResultItemsLocked(1)
+	if len(items) != 5 {
+		t.Fatalf("len(items) = %d, want 5", len(items))
+	}
+	for _, item := range items {
+		if !item.Success {
+			t.Fatalf("playback item success = false, want true")
+		}
+		if item.LatencyMS <= 0 || item.LatencyMS > demoDynamicQoSMaxLatencyMS {
+			t.Fatalf("latency = %v, want dynamic playback under target", item.LatencyMS)
+		}
+	}
+}
+
 func TestHandleDemoEventsInitialSnapshot(t *testing.T) {
 	mgr := newScenarioManager("/tmp/mock-ue")
 	session := newDemoSession(StrategyDynamicQoS)

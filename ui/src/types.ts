@@ -3,6 +3,8 @@ export type StrategyName =
   | 'standard_gbr'
   | 'dynamic_qos'
 
+export type DemoRuntimeMode = 'real' | 'playback'
+
 export type DemoUserStatus =
   | 'planned'
   | 'idle'
@@ -58,6 +60,7 @@ export interface DemoUser {
 
 export interface DemoState {
   strategy: StrategyName
+  runtime_mode: DemoRuntimeMode
   running: boolean
   prepared_at: string
   initial_users: number
@@ -66,26 +69,6 @@ export interface DemoState {
   counters: DemoCounters
   scenario: DemoScenario
   users: DemoUser[]
-}
-
-export interface DemoUploadStreamEvent {
-  client_id: string
-  attempt: number
-  profile?: 'public' | 'optimized'
-  treatment?: DemoTreatment
-  at: string
-}
-
-export interface ClientSample {
-  client_id: string
-  client_ip: string
-  profile: 'public' | 'optimized'
-  success: boolean
-  latency_ms?: number
-  bytes: number
-  error?: string
-  attempt: number
-  at: string
 }
 
 export interface UploadResult {
@@ -104,10 +87,7 @@ export interface ResultBatch {
 
 export type DemoStreamEventType =
   | 'snapshot'
-  | 'upload_begin'
-  | 'upload_end'
   | 'result_batch'
-  | 'sample'
   | 'heartbeat'
   | 'error'
 
@@ -115,8 +95,6 @@ export interface DemoStreamEvent {
   type: DemoStreamEventType
   at: string
   state?: DemoState
-  upload?: DemoUploadStreamEvent
   results?: ResultBatch
-  sample?: ClientSample
   message?: string
 }

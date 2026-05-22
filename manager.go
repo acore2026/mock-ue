@@ -63,6 +63,7 @@ type ScenarioManager struct {
 	demoLast  map[string]DemoClientResult
 	demoRamp  context.CancelFunc
 	demoProg  context.CancelFunc
+	demoPlay  context.CancelFunc
 	demoHTTP  *http.Server
 	demoSock  string
 	runtime   *ScenarioRuntime
@@ -591,6 +592,7 @@ func (m *ScenarioManager) stopAll() error {
 func (m *ScenarioManager) stopLocked() error {
 	m.stopDemoRampLocked()
 	m.stopDemoProgressLocked()
+	m.stopDemoPlaybackLocked()
 	m.stopDemoCallbackServerLocked()
 	m.demoLast = make(map[string]DemoClientResult)
 	for _, proc := range m.clients {
@@ -612,6 +614,10 @@ func (m *ScenarioManager) stopLocked() error {
 	}
 	m.runtime = nil
 	return nil
+}
+
+func (m *ScenarioManager) demoRunActiveLocked() bool {
+	return m.server != nil || m.demoPlay != nil
 }
 
 func (m *ScenarioManager) stopDemoRampLocked() {

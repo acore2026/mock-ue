@@ -1,4 +1,4 @@
-import type { DemoState, DemoStreamEvent, StrategyName } from './types'
+import type { DemoRuntimeMode, DemoState, DemoStreamEvent, StrategyName } from './types'
 
 async function decodeResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
@@ -16,13 +16,13 @@ export async function fetchDemoState(): Promise<DemoState | null> {
   return decodeResponse<DemoState>(response)
 }
 
-export async function prepareDemoSession(strategy: StrategyName): Promise<DemoState> {
+export async function prepareDemoSession(strategy: StrategyName, runtimeMode: DemoRuntimeMode = 'real'): Promise<DemoState> {
   const response = await fetch('/v1/demo/session', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ strategy }),
+    body: JSON.stringify({ strategy, runtime_mode: runtimeMode }),
   })
   return decodeResponse<DemoState>(response)
 }

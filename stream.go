@@ -12,33 +12,21 @@ import (
 )
 
 const (
-	demoStreamSnapshot    = "snapshot"
-	demoStreamUploadBegin = "upload_begin"
-	demoStreamUploadEnd   = "upload_end"
-	demoStreamResults     = "result_batch"
-	demoStreamSample      = "sample"
-	demoStreamHeartbeat   = "heartbeat"
-	demoStreamError       = "error"
+	demoStreamSnapshot  = "snapshot"
+	demoStreamResults   = "result_batch"
+	demoStreamHeartbeat = "heartbeat"
+	demoStreamError     = "error"
 
 	demoProgressInterval = time.Second
+	demoHeartbeatPeriod  = 15 * time.Second
 )
 
-type DemoStreamUploadEvent struct {
-	ClientID  string        `json:"client_id"`
-	Attempt   int           `json:"attempt"`
-	Profile   ProfileName   `json:"profile,omitempty"`
-	Treatment DemoTreatment `json:"treatment,omitempty"`
-	At        time.Time     `json:"at"`
-}
-
 type DemoStreamEvent struct {
-	Type    string                 `json:"type"`
-	At      time.Time              `json:"at"`
-	State   *DemoStateResponse     `json:"state,omitempty"`
-	Upload  *DemoStreamUploadEvent `json:"upload,omitempty"`
-	Results *DemoResultBatch       `json:"results,omitempty"`
-	Sample  *ClientSample          `json:"sample,omitempty"`
-	Message string                 `json:"message,omitempty"`
+	Type    string             `json:"type"`
+	At      time.Time          `json:"at"`
+	State   *DemoStateResponse `json:"state,omitempty"`
+	Results *DemoResultBatch   `json:"results,omitempty"`
+	Message string             `json:"message,omitempty"`
 }
 
 type DemoClientResult struct {
@@ -135,7 +123,7 @@ func (m *ScenarioManager) handleDemoStream(w http.ResponseWriter, r *http.Reques
 		}
 	}()
 
-	heartbeat := time.NewTicker(5 * time.Second)
+	heartbeat := time.NewTicker(demoHeartbeatPeriod)
 	defer heartbeat.Stop()
 
 	for {
@@ -185,7 +173,7 @@ func (m *ScenarioManager) handleDemoEvents(w http.ResponseWriter, r *http.Reques
 	}
 	flusher.Flush()
 
-	heartbeat := time.NewTicker(5 * time.Second)
+	heartbeat := time.NewTicker(demoHeartbeatPeriod)
 	defer heartbeat.Stop()
 
 	for {
@@ -245,24 +233,7 @@ func (m *ScenarioManager) broadcastDemoSnapshotLocked() {
 	})
 }
 
-func (m *ScenarioManager) broadcastDemoUploadLocked(eventType string, req DemoUploadEventRequest, profile ProfileName, treatment DemoTreatment) {
-	if m.demo == nil {
-		return
-	}
-	m.stream.broadcast(DemoStreamEvent{
-		Type: eventType,
-		At:   time.Now().UTC(),
-		Upload: &DemoStreamUploadEvent{
-			ClientID:  req.ClientID,
-			Attempt:   req.Attempt,
-			Profile:   profile,
-			Treatment: treatment,
-			At:        time.Now().UTC(),
-		},
-	})
-}
-
-func (m *ScenarioManager) broadcastDemoSampleLocked(sample ClientSample) {
+func (m *ScenarioManager) recordDemoResultLocked(sample ClientSample) {
 	if m.demo == nil {
 		return
 	}
@@ -274,11 +245,6 @@ func (m *ScenarioManager) broadcastDemoSampleLocked(sample ClientSample) {
 		PhaseMS:   int(clientPhaseOffset(sample.ClientID, time.Second).Milliseconds()),
 		At:        sample.At,
 	}
-	m.stream.broadcast(DemoStreamEvent{
-		Type:   demoStreamSample,
-		At:     time.Now().UTC(),
-		Sample: &sample,
-	})
 }
 
 func ptrTo[T any](value T) *T {

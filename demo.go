@@ -55,9 +55,17 @@ const (
 	DemoTreatmentTemporaryGrant DemoTreatment = "temporary_grant"
 )
 
+type DemoRuntimeMode string
+
+const (
+	DemoRuntimeReal     DemoRuntimeMode = "real"
+	DemoRuntimePlayback DemoRuntimeMode = "playback"
+)
+
 type DemoSessionRequest struct {
-	Strategy  StrategyName           `json:"strategy"`
-	Bandwidth *DemoBandwidthOverride `json:"bandwidth,omitempty"`
+	Strategy    StrategyName           `json:"strategy"`
+	RuntimeMode DemoRuntimeMode        `json:"runtime_mode,omitempty"`
+	Bandwidth   *DemoBandwidthOverride `json:"bandwidth,omitempty"`
 }
 
 type DemoBandwidthOverride struct {
@@ -102,20 +110,22 @@ type DemoUser struct {
 }
 
 type DemoStateResponse struct {
-	Strategy      StrategyName   `json:"strategy"`
-	Running       bool           `json:"running"`
-	PreparedAt    time.Time      `json:"prepared_at"`
-	InitialUsers  int            `json:"initial_users"`
-	RampPerSecond int            `json:"ramp_per_second"`
-	Bandwidth     DemoBandwidth  `json:"bandwidth"`
-	Counters      DemoCounters   `json:"counters"`
-	Scenario      ScenarioConfig `json:"scenario"`
-	Users         []DemoUser     `json:"users"`
+	Strategy      StrategyName    `json:"strategy"`
+	RuntimeMode   DemoRuntimeMode `json:"runtime_mode"`
+	Running       bool            `json:"running"`
+	PreparedAt    time.Time       `json:"prepared_at"`
+	InitialUsers  int             `json:"initial_users"`
+	RampPerSecond int             `json:"ramp_per_second"`
+	Bandwidth     DemoBandwidth   `json:"bandwidth"`
+	Counters      DemoCounters    `json:"counters"`
+	Scenario      ScenarioConfig  `json:"scenario"`
+	Users         []DemoUser      `json:"users"`
 }
 
 type DemoSession struct {
 	PreparedAt    time.Time
 	Strategy      StrategyName
+	RuntimeMode   DemoRuntimeMode
 	InitialUsers  int
 	RampPerSecond int
 	Config        ScenarioConfig
@@ -156,10 +166,17 @@ func (m *ScenarioManager) handleDemoSession(w http.ResponseWriter, r *http.Reque
 		http.Error(w, fmt.Sprintf("unknown strategy %q", req.Strategy), http.StatusBadRequest)
 		return
 	}
+	if req.RuntimeMode == "" {
+		req.RuntimeMode = DemoRuntimeReal
+	}
+	if !validDemoRuntimeMode(req.RuntimeMode) {
+		http.Error(w, fmt.Sprintf("unknown runtime_mode %q", req.RuntimeMode), http.StatusBadRequest)
+		return
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.server != nil || m.runtime != nil {
+	if m.demoRunActiveLocked() || m.runtime != nil {
 		if err := m.stopLocked(); err != nil {
 			http.Error(w, fmt.Sprintf("failed to stop active scenario: %v", err), http.StatusInternalServerError)
 			return
@@ -167,6 +184,7 @@ func (m *ScenarioManager) handleDemoSession(w http.ResponseWriter, r *http.Reque
 	}
 
 	session := newDemoSession(req.Strategy)
+	session.RuntimeMode = req.RuntimeMode
 	if req.Bandwidth != nil {
 		applyDemoBandwidthOverride(&session.Config, *req.Bandwidth)
 	}
@@ -202,7 +220,7 @@ func (m *ScenarioManager) handleDemoRunStart(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "demo session not prepared", http.StatusConflict)
 		return
 	}
-	if m.server != nil {
+	if m.demoRunActiveLocked() {
 		http.Error(w, "demo run already active", http.StatusConflict)
 		return
 	}
@@ -241,11 +259,17 @@ func (m *ScenarioManager) handleDemoRunSpawn(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "demo session not prepared", http.StatusConflict)
 		return
 	}
-	if m.server == nil {
+	if !m.demoRunActiveLocked() {
 		http.Error(w, "demo run not active", http.StatusConflict)
 		return
 	}
-	if _, err := m.activateDemoUsersLocked(count); err != nil {
+	var err error
+	if m.demo.RuntimeMode == DemoRuntimePlayback {
+		_, err = m.activatePlaybackUsersLocked(count)
+	} else {
+		_, err = m.activateDemoUsersLocked(count)
+	}
+	if err != nil {
 		http.Error(w, fmt.Sprintf("demo spawn failed: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -284,11 +308,13 @@ func (m *ScenarioManager) handleDemoRunReset(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	strategy := m.demo.Strategy
+	runtimeMode := m.demo.RuntimeMode
 	if err := m.stopLocked(); err != nil {
 		http.Error(w, fmt.Sprintf("failed to reset demo run: %v", err), http.StatusInternalServerError)
 		return
 	}
 	session := newDemoSession(strategy)
+	session.RuntimeMode = runtimeMode
 	m.metrics.reset(session.Config)
 	m.demo = &session
 	m.demoLast = make(map[string]DemoClientResult)
@@ -313,7 +339,6 @@ func (m *ScenarioManager) handleDemoUploadBegin(w http.ResponseWriter, r *http.R
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
-	m.broadcastDemoUploadLocked(demoStreamUploadBegin, req, profile, treatment)
 	writeJSON(w, http.StatusOK, DemoUploadEventResponse{
 		Profile:   profile,
 		Treatment: treatment,
@@ -332,12 +357,10 @@ func (m *ScenarioManager) handleDemoUploadEnd(w http.ResponseWriter, r *http.Req
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	profile, treatment, err := m.endDemoUploadLocked(req.ClientID)
-	if err != nil {
+	if _, _, err := m.endDemoUploadLocked(req.ClientID); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
-	m.broadcastDemoUploadLocked(demoStreamUploadEnd, req, profile, treatment)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -363,6 +386,7 @@ func newDemoSession(strategy StrategyName) DemoSession {
 	return DemoSession{
 		PreparedAt:    time.Now().UTC(),
 		Strategy:      strategy,
+		RuntimeMode:   DemoRuntimeReal,
 		InitialUsers:  demoInitialUsers,
 		RampPerSecond: demoRampPerSecond,
 		Config:        cfg,
@@ -404,7 +428,20 @@ func newDemoRuntimeConfig(session DemoSession) ScenarioConfig {
 	return cfg
 }
 
+func validDemoRuntimeMode(mode DemoRuntimeMode) bool {
+	switch mode {
+	case DemoRuntimeReal, DemoRuntimePlayback:
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *ScenarioManager) startDemoRunLocked() error {
+	if m.demo.RuntimeMode == DemoRuntimePlayback {
+		return m.startDemoPlaybackLocked()
+	}
+
 	m.stopDemoRampLocked()
 	m.config = newDemoRuntimeConfig(*m.demo)
 	m.metrics.reset(m.config)
@@ -423,6 +460,166 @@ func (m *ScenarioManager) startDemoRunLocked() error {
 	m.startDemoRampLocked()
 	m.startDemoProgressLocked()
 	return nil
+}
+
+func (m *ScenarioManager) startDemoPlaybackLocked() error {
+	m.stopDemoRampLocked()
+	m.stopDemoProgressLocked()
+	m.stopDemoPlaybackLocked()
+	m.config = newDemoRuntimeConfig(*m.demo)
+	m.metrics.reset(m.config)
+	startedAt := time.Now()
+	m.metrics.markStarted(startedAt)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	m.demoPlay = cancel
+	go m.runDemoPlayback(ctx)
+	return nil
+}
+
+func (m *ScenarioManager) stopDemoPlaybackLocked() {
+	if m.demoPlay != nil {
+		m.demoPlay()
+		m.demoPlay = nil
+	}
+}
+
+func (m *ScenarioManager) runDemoPlayback(ctx context.Context) {
+	ticker := time.NewTicker(demoProgressInterval)
+	defer ticker.Stop()
+
+	tick := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			tick++
+			m.mu.Lock()
+			if m.demo == nil || m.demo.RuntimeMode != DemoRuntimePlayback || m.demoPlay == nil {
+				m.mu.Unlock()
+				return
+			}
+			activated, err := m.activatePlaybackUsersLocked(m.demo.RampPerSecond)
+			if err != nil {
+				log.Printf("demo playback activation failed: %v", err)
+				m.mu.Unlock()
+				continue
+			}
+			items := m.playbackResultItemsLocked(tick)
+			if activated > 0 {
+				m.broadcastDemoSnapshotLocked()
+			}
+			if len(items) > 0 {
+				m.broadcastDemoResultsLocked(items)
+				m.broadcastDemoSnapshotLocked()
+			}
+			m.mu.Unlock()
+		}
+	}
+}
+
+func (m *ScenarioManager) activatePlaybackUsersLocked(count int) (int, error) {
+	if m.demo == nil {
+		return 0, errors.New("demo session not prepared")
+	}
+
+	activated := 0
+	for i := range m.demo.Users {
+		if activated >= count {
+			break
+		}
+		if m.demo.Users[i].ActivatedAt != nil {
+			continue
+		}
+
+		now := time.Now().UTC()
+		profile := demoProfileForUser(m.demo.Strategy, m.demo.Users[i].Index)
+		m.demo.Users[i].ActivatedAt = &now
+		m.demo.Users[i].Active = true
+		m.demo.Users[i].Running = true
+		m.demo.Users[i].Status = DemoUserStatusIdle
+		m.demo.Users[i].Treatment = demoEffectiveTreatment(m.demo.Strategy, m.demo.Users[i].Treatment, profile)
+		m.metrics.setClient(m.demo.Users[i].ClientID, m.demo.Users[i].ClientIP, profile)
+		m.metrics.setClientRunning(m.demo.Users[i].ClientID, true)
+		activated++
+	}
+	return activated, nil
+}
+
+func (m *ScenarioManager) playbackResultItemsLocked(tick int) []DemoClientResult {
+	if m.demo == nil {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	activeUsers := m.demoActiveUsersLocked()
+	items := make([]DemoClientResult, 0, activeUsers)
+	for i := range m.demo.Users {
+		if !m.demo.Users[i].Active {
+			continue
+		}
+
+		user := &m.demo.Users[i]
+		user.Attempts++
+		profile, treatment := demoUploadAssignment(m.demo.Strategy, user.Index, true)
+		latencyMS := playbackLatencyMS(m.demo.Strategy, *user, activeUsers, tick)
+		status := classifyDemoUserStatus(latencyMS)
+		user.Running = true
+		user.Uploading = false
+		user.Treatment = treatment
+		user.Status = status
+		user.LastLatencyMS = latencyMS
+		user.LastSeen = &now
+		m.metrics.setProfile(user.ClientID, profile)
+
+		sample := ClientSample{
+			ClientID:  user.ClientID,
+			ClientIP:  user.ClientIP,
+			Profile:   profile,
+			Success:   true,
+			LatencyMS: latencyMS,
+			Bytes:     m.demo.Config.UploadBytes,
+			Attempt:   user.Attempts,
+			At:        now,
+		}
+		m.metrics.addSample(sample)
+
+		result := DemoClientResult{
+			ID:        user.ClientID,
+			Attempt:   user.Attempts,
+			Success:   true,
+			LatencyMS: latencyMS,
+			PhaseMS:   int(clientPhaseOffset(user.ClientID, time.Second).Milliseconds()),
+			At:        now,
+		}
+		m.demoLast[user.ClientID] = result
+		items = append(items, normalizeDemoResult(m.demo.Strategy, activeUsers, result))
+	}
+	return items
+}
+
+func playbackLatencyMS(strategy StrategyName, user DemoUser, activeUsers int, tick int) float64 {
+	jitter := demoLatencyJitterMS(user.ClientID, user.Attempts+tick, 10)
+	switch strategy {
+	case StrategyDynamicQoS:
+		return clampDemoLatency(66+jitter, 42, 118)
+	case StrategyStandardGBR:
+		if isDemoStandardGBRReservedUser(user.Index) {
+			return clampDemoLatency(72+jitter, 48, 135)
+		}
+		if activeUsers <= demoStandardGBRPublicHealthyUsers {
+			return clampDemoLatency(112+jitter, 72, 150)
+		}
+		overload := activeUsers - demoStandardGBRPublicHealthyUsers
+		return clampDemoLatency(300+float64(overload)*5+jitter, 300, 500)
+	default:
+		if activeUsers <= demoNoOptimizationGuaranteedUsers {
+			return clampDemoLatency(88+jitter, 55, 145)
+		}
+		overload := activeUsers - demoNoOptimizationGuaranteedUsers
+		return clampDemoLatency(300+float64(overload)*4+jitter, 300, 500)
+	}
 }
 
 func (m *ScenarioManager) startDemoRampLocked() {
@@ -496,7 +693,8 @@ func (m *ScenarioManager) demoStateLocked() DemoStateResponse {
 	now := time.Now().UTC()
 	state := DemoStateResponse{
 		Strategy:      m.demo.Strategy,
-		Running:       m.server != nil,
+		RuntimeMode:   m.demo.RuntimeMode,
+		Running:       m.demoRunActiveLocked(),
 		PreparedAt:    m.demo.PreparedAt,
 		InitialUsers:  m.demo.InitialUsers,
 		RampPerSecond: m.demo.RampPerSecond,
@@ -515,7 +713,7 @@ func (m *ScenarioManager) demoStateLocked() DemoStateResponse {
 		clientReports[client.ClientID] = client
 	}
 
-	sessionOnline := m.server != nil
+	sessionOnline := m.demoRunActiveLocked()
 	activeUsers := m.demoActiveUsersLocked()
 	for _, user := range m.demo.Users {
 		if user.ActivatedAt != nil {
@@ -677,7 +875,7 @@ func (m *ScenarioManager) recordDemoSampleLocked(sample ClientSample) {
 		}
 	}
 	m.metrics.addSample(sample)
-	m.broadcastDemoSampleLocked(sample)
+	m.recordDemoResultLocked(sample)
 }
 
 func (m *ScenarioManager) demoActiveUsersLocked() int {
