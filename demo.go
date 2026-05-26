@@ -33,6 +33,8 @@ const (
 	demoTotalRateMbps               = demoDynamicQoSRateMbps + demoDynamicQoSPublicRateMbps
 
 	demoDynamicQoSMaxLatencyMS = 150.0
+
+	demoPlaybackUploadWindow = 300 * time.Millisecond
 )
 
 type DemoUserStatus string
@@ -339,6 +341,7 @@ func (m *ScenarioManager) handleDemoUploadBegin(w http.ResponseWriter, r *http.R
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+	m.broadcastDemoSnapshotLocked()
 	writeJSON(w, http.StatusOK, DemoUploadEventResponse{
 		Profile:   profile,
 		Treatment: treatment,
@@ -361,6 +364,7 @@ func (m *ScenarioManager) handleDemoUploadEnd(w http.ResponseWriter, r *http.Req
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+	m.broadcastDemoSnapshotLocked()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -506,10 +510,24 @@ func (m *ScenarioManager) runDemoPlayback(ctx context.Context) {
 				m.mu.Unlock()
 				continue
 			}
-			items := m.playbackResultItemsLocked(tick)
-			if activated > 0 {
+			uploading := m.beginPlaybackUploadsLocked()
+			if activated > 0 || uploading > 0 {
 				m.broadcastDemoSnapshotLocked()
 			}
+			m.mu.Unlock()
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(demoPlaybackUploadWindow):
+			}
+
+			m.mu.Lock()
+			if m.demo == nil || m.demo.RuntimeMode != DemoRuntimePlayback || m.demoPlay == nil {
+				m.mu.Unlock()
+				return
+			}
+			items := m.playbackResultItemsLocked(tick)
 			if len(items) > 0 {
 				m.broadcastDemoResultsLocked(items)
 				m.broadcastDemoSnapshotLocked()
@@ -547,6 +565,31 @@ func (m *ScenarioManager) activatePlaybackUsersLocked(count int) (int, error) {
 	return activated, nil
 }
 
+func (m *ScenarioManager) beginPlaybackUploadsLocked() int {
+	if m.demo == nil {
+		return 0
+	}
+
+	now := time.Now().UTC()
+	uploading := 0
+	for i := range m.demo.Users {
+		if !m.demo.Users[i].Active {
+			continue
+		}
+
+		user := &m.demo.Users[i]
+		profile, treatment := demoUploadAssignment(m.demo.Strategy, user.Index, true)
+		user.Running = true
+		user.Uploading = true
+		user.UploadStartedAt = &now
+		user.Treatment = treatment
+		user.Status = DemoUserStatusRunning
+		m.metrics.setProfile(user.ClientID, profile)
+		uploading++
+	}
+	return uploading
+}
+
 func (m *ScenarioManager) playbackResultItemsLocked(tick int) []DemoClientResult {
 	if m.demo == nil {
 		return nil
@@ -567,6 +610,7 @@ func (m *ScenarioManager) playbackResultItemsLocked(tick int) []DemoClientResult
 		status := classifyDemoUserStatus(latencyMS)
 		user.Running = true
 		user.Uploading = false
+		user.UploadStartedAt = nil
 		user.Treatment = treatment
 		user.Status = status
 		user.LastLatencyMS = latencyMS

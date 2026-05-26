@@ -1,5 +1,5 @@
 import { memo, startTransition, useDeferredValue, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Box, Card, CardContent, Chip, Typography } from '@mui/material'
 import {
@@ -144,6 +144,10 @@ type DeviceCardView = {
   displayStatus: DemoUserStatus
   displayLatencyMS: number
   treatmentClass: string
+  qosIcon: 'none' | 'dynamic-cycle' | 'gbr'
+  qosCycleDelayMS: number
+  effectsReady: boolean
+  effectsActive: boolean
   outcome: { label: string; tone: string }
   latencyText: string
   accessibleLabel: string
@@ -228,6 +232,7 @@ function useDemoLiveState() {
   const [liveResults, setLiveResults] = useState<LiveResultState>(() => emptyLiveResultState())
   const [historyPoints, setHistoryPoints] = useState<HistoryPoint[]>([])
   const recordedAttemptsRef = useRef<Record<string, number>>({})
+  const lastHistoryPointAtRef = useRef(0)
   const stateRef = useRef<DemoState | null>(null)
 
   function setActionPending(action: PendingAction, value: boolean) {
@@ -241,8 +246,21 @@ function useDemoLiveState() {
 
   function resetSandboxState() {
     recordedAttemptsRef.current = {}
+    lastHistoryPointAtRef.current = 0
     setLiveResults(emptyLiveResultState())
     setHistoryPoints([])
+  }
+
+  function appendSampledHistoryPoint(makePoint: (current: HistoryPoint[]) => HistoryPoint | null) {
+    const nowMS = Date.now()
+    if (nowMS - lastHistoryPointAtRef.current < HISTORY_POINT_UPDATE_MS) {
+      return
+    }
+    lastHistoryPointAtRef.current = nowMS
+    setHistoryPoints((current) => {
+      const point = makePoint(current)
+      return point ? appendHistoryPoint(current, point) : current
+    })
   }
 
   function applyState(nextState: DemoState | null) {
@@ -258,7 +276,7 @@ function useDemoLiveState() {
     setRuntimeMode(nextState.runtime_mode)
 
     if (nextState.running || nextState.counters.active_users > 0 || nextState.users.length > 0) {
-      setHistoryPoints((current) => appendHistoryPoint(current, makeHistoryPoint(nextState, current.length)))
+      appendSampledHistoryPoint((current) => makeHistoryPoint(nextState, current.length))
     }
 
     if (!nextState.running && nextState.counters.active_users === 0) {
@@ -404,9 +422,9 @@ function useDemoLiveState() {
 
         const currentState = stateRef.current
         if (currentState && freshItems.length > 0) {
-          setHistoryPoints((current) => {
+          appendSampledHistoryPoint((current) => {
             const point = makeHistoryPointFromResults(currentState, items, current.length)
-            return point ? appendHistoryPoint(current, point) : current
+            return point
           })
         }
       })
@@ -941,8 +959,8 @@ const DeviceBoard = memo(function DeviceBoard({
   const heroIDs = useMemo(() => new Set(heroUsers.map((user) => user.client_id)), [heroUsers])
   const crowdUsers = useMemo(() => users.filter((user) => !heroIDs.has(user.client_id)), [users, heroIDs])
   const crowdCards = useMemo(
-    () => crowdUsers.map((user) => makeDeviceCardView(user, deferredResultByID[user.client_id], deferredLatencyHistoryByID[user.client_id] ?? [])),
-    [crowdUsers, deferredLatencyHistoryByID, deferredResultByID],
+    () => crowdUsers.map((user) => makeDeviceCardView(user, state?.strategy ?? 'no_optimization', Boolean(state?.running), deferredResultByID[user.client_id], deferredLatencyHistoryByID[user.client_id] ?? [])),
+    [crowdUsers, deferredLatencyHistoryByID, deferredResultByID, state?.running, state?.strategy],
   )
   const filterCounts = useMemo(() => boardFilterCounts(crowdCards), [crowdCards])
   const visibleUsers = useMemo(
@@ -1021,7 +1039,7 @@ const DeviceCard = memo(function DeviceCard({
 }) {
   return (
     <article
-      className={`ue-card status-${card.displayStatus} ${card.treatmentClass} ${card.online && !card.user.active ? 'is-online-idle' : ''} ${card.online ? '' : 'is-offline'}`}
+      className={`ue-card status-${card.displayStatus} ${card.treatmentClass} ${card.effectsActive ? '' : 'effects-paused'} ${card.effectsActive && card.online && !card.user.active ? 'is-online-idle' : ''} ${card.online ? '' : 'is-offline'}`}
       aria-label={card.accessibleLabel}
       title={card.accessibleLabel}
     >
@@ -1032,11 +1050,23 @@ const DeviceCard = memo(function DeviceCard({
             <strong>{card.label}</strong>
           </div>
         </div>
-        <div className="ue-card-badges">
-          <span className="ue-dynamic-qos-badge" aria-label="Dynamic QoS">
-            <Sparkles size={14} aria-hidden="true" />
-          </span>
-        </div>
+        {card.qosIcon !== 'none' ? (
+          <div className="ue-card-badges">
+            {card.qosIcon === 'dynamic-cycle' ? (
+              <span
+                className={`ue-dynamic-qos-badge ${card.effectsActive ? 'is-cycling' : 'is-paused'}`}
+                style={{ '--qos-cycle-delay': `-${card.qosCycleDelayMS}ms` } as CSSProperties}
+                aria-label={card.effectsActive ? 'Adaptive QoS cycling' : 'Adaptive QoS standby'}
+              >
+                <Sparkles size={14} aria-hidden="true" />
+              </span>
+            ) : (
+              <span className="ue-gbr-badge" aria-label="GBR QoS">
+                <Shield size={14} aria-hidden="true" />
+              </span>
+            )}
+          </div>
+        ) : null}
       </div>
 
       <div className="ue-card-body">
@@ -1045,7 +1075,7 @@ const DeviceCard = memo(function DeviceCard({
         </div>
       </div>
 
-      <CrowdLatencyStrip className={`crowd-latency-bars tone-${card.outcome.tone}`} samples={card.latencyHistory} />
+      <CrowdLatencyStrip className={`crowd-latency-bars tone-${card.outcome.tone}`} samples={card.effectsActive ? card.latencyHistory : []} />
     </article>
   )
 }, areDeviceCardsEqual)
@@ -1058,6 +1088,10 @@ function areDeviceCardsEqual(previous: { card: DeviceCardView }, next: { card: D
     previous.card.displayStatus === next.card.displayStatus &&
     previous.card.displayLatencyMS === next.card.displayLatencyMS &&
     previous.card.treatmentClass === next.card.treatmentClass &&
+    previous.card.qosIcon === next.card.qosIcon &&
+    previous.card.qosCycleDelayMS === next.card.qosCycleDelayMS &&
+    previous.card.effectsReady === next.card.effectsReady &&
+    previous.card.effectsActive === next.card.effectsActive &&
     previous.card.outcome.tone === next.card.outcome.tone &&
     previous.card.latencyText === next.card.latencyText &&
     previous.card.latencyHistory === next.card.latencyHistory
@@ -1075,7 +1109,15 @@ function ScenarioHeroCard({
   latestResult?: UploadResult
   latencyHistory: number[]
 }) {
-  const imageFrameIndex = useImageSequenceFrame(scenario3RobotDogFrames.length, Boolean(state?.running), 300)
+  const imagePlaybackStatus = hero ? latestResult ? classifyResultStatus(latestResult) : hero.uploading ? 'running' : hero.status : undefined
+  const imagePlayback = useImageSequenceFrame(
+    scenario3RobotDogFrames.length,
+    Boolean(state?.running),
+    hero?.client_id,
+    hero?.upload_started_at,
+    imagePlaybackIntervalForStatus(imagePlaybackStatus),
+  )
+  const heroEffectsReady = Boolean(state?.running && imagePlayback.started)
 
   if (!state) {
     return null
@@ -1091,14 +1133,18 @@ function ScenarioHeroCard({
   }
 
   const uploadDelay = latestResult?.latency_ms ?? hero.last_latency_ms ?? 0
-  const displayStatus = latestResult ? classifyResultStatus(latestResult) : hero.uploading ? 'running' : hero.status
+  const rawDisplayStatus = latestResult ? classifyResultStatus(latestResult) : hero.uploading ? 'running' : hero.status
+  const displayStatus = heroEffectsReady ? rawDisplayStatus : 'idle'
   const outcome = aiOutcomeForStatus(displayStatus, hero.uploading)
-  const latencyText = uploadDelay > 0 ? formatLatency(uploadDelay) : 'Waiting'
-  const targetMet = latestResult?.success === true && uploadDelay > 0 && uploadDelay < 100
+  const latencyText = heroEffectsReady && uploadDelay > 0 ? formatLatency(uploadDelay) : 'Waiting'
+  const targetMet = heroEffectsReady && latestResult?.success === true && uploadDelay > 0 && uploadDelay < 100
   const heroProfile = heroProfileForStrategy(state.strategy)
-  const resultLabel = latestResult?.success ? 'Threat level: Low' : 'Waiting for result'
-  const e2eDelayText = uploadDelay > 0 ? formatLatency(e2eDelayForUploadDelay(uploadDelay, hero.index + hero.attempts)) : '--'
-  const heroImageSrc = scenario3RobotDogFrames[imageFrameIndex] ?? scenario3RobotDogFrames[0]
+  const threatLevel = heroEffectsReady && latestResult?.success ? 'Low' : 'Waiting'
+  const e2eDelayMS = heroEffectsReady && uploadDelay > 0 ? e2eDelayForUploadDelay(uploadDelay, hero.index + hero.attempts) : 0
+  const e2eDelayText = e2eDelayMS > 0 ? formatLatency(e2eDelayMS) : '--'
+  const imageWarning = heroEffectsReady ? streamingWarningForStatus(displayStatus) : null
+  const delayTone = heroEffectsReady ? e2eDelayTone(e2eDelayMS) : 'waiting'
+  const latencyTone = heroEffectsReady ? heroLatencyTone(uploadDelay) : 'waiting'
 
   return (
     <Card className={`scenario3-hero-card outcome-${outcome.tone}`} variant="outlined">
@@ -1127,18 +1173,45 @@ function ScenarioHeroCard({
         </div>
 
         <Box className="scenario3-latest-image">
-          <div className="scenario3-image-caption">
-            <span>Latest Image</span>
-            <strong>{resultLabel}</strong>
+          <div className={`scenario3-live-badge${heroEffectsReady ? ' is-live' : ' is-waiting'}`}>
+            <Radio size={12} aria-hidden="true" />
+            <span>{heroEffectsReady ? 'Live' : 'Waiting'}</span>
           </div>
-          <Box component="img" src={heroImageSrc} alt="" aria-hidden="true" />
-          <div className="scenario3-e2e-delay">
+          <div className={`scenario3-image-stack${heroEffectsReady ? '' : ' is-waiting'}`} aria-hidden="true">
+            {scenario3RobotDogFrames.map((frame, index) => (
+              <Box
+                key={frame}
+                component="img"
+                className={heroEffectsReady && index === imagePlayback.frameIndex ? 'is-active' : undefined}
+                src={frame}
+                alt=""
+                decoding="async"
+                loading="eager"
+              />
+            ))}
+          </div>
+          {!heroEffectsReady ? (
+            <div className="scenario3-image-waiting" aria-hidden="true">
+              <span>Waiting for upload</span>
+            </div>
+          ) : null}
+          {imageWarning ? (
+            <div className={`scenario3-stream-warning tone-${imageWarning.tone}`}>
+              <AlertTriangle size={13} aria-hidden="true" />
+              <span>{imageWarning.label}</span>
+            </div>
+          ) : null}
+          <div className={`scenario3-threat-badge${threatLevel === 'Low' ? ' tone-low' : ' tone-waiting'}`}>
+            <span>Threat level</span>
+            <strong>{threatLevel}</strong>
+          </div>
+          <div className={`scenario3-e2e-delay tone-${delayTone}`}>
             <span>E2E delay</span>
             <strong>{e2eDelayText}</strong>
           </div>
         </Box>
 
-        <Box className={`scenario3-latency-section tone-${heroLatencyTone(uploadDelay)}`} aria-label="Image upload latency section">
+        <Box className={`scenario3-latency-section tone-${latencyTone}`} aria-label="Image upload latency section">
           <div className="scenario3-latency-block">
             <span><ImageUp size={13} aria-hidden="true" /> IMAGE UPLOAD LATENCY</span>
             <strong>{latencyText}</strong>
@@ -1149,7 +1222,7 @@ function ScenarioHeroCard({
             <strong>realtime AI image assessment</strong>
           </div>
           <div className="scenario3-latency-spark" aria-hidden="true">
-            <LatencyBarsStrip className={`hero-latency-bars tone-${heroLatencyTone(uploadDelay)}`} samples={latencyHistory} barCount={12} />
+            <LatencyBarsStrip className={`hero-latency-bars tone-${latencyTone}`} samples={heroEffectsReady ? latencyHistory : []} barCount={12} />
           </div>
         </Box>
 
@@ -1158,7 +1231,7 @@ function ScenarioHeroCard({
           baselineBandwidthMbps={state.bandwidth.public_rate_mbps}
           intentSeed={hero.index + hero.attempts}
           latencyText={latencyText}
-          running={Boolean(state.running)}
+          running={heroEffectsReady}
           strategy={state.strategy}
           targetMet={targetMet}
         />
@@ -1844,6 +1917,29 @@ function heroLatencyTone(latencyMS: number) {
   return 'critical'
 }
 
+function e2eDelayTone(delayMS: number) {
+  if (!Number.isFinite(delayMS) || delayMS <= 0) {
+    return 'waiting'
+  }
+  if (delayMS < 130) {
+    return 'healthy'
+  }
+  if (delayMS < 330) {
+    return 'degraded'
+  }
+  return 'critical'
+}
+
+function streamingWarningForStatus(status: DemoUserStatus) {
+  if (status === 'high' || status === 'failed') {
+    return { label: 'Poor connection · playback slowed', tone: 'critical' }
+  }
+  if (status === 'delayed') {
+    return { label: 'Network delay · recovering stream', tone: 'degraded' }
+  }
+  return null
+}
+
 function baselineUploadBandwidth(publicRateMbps: number) {
   if (!Number.isFinite(publicRateMbps) || publicRateMbps <= 0) {
     return 0.8
@@ -1859,13 +1955,15 @@ type BandwidthSample = {
 
 const BANDWIDTH_SAMPLE_MS = 150
 const BANDWIDTH_SAMPLE_COUNT = 40
-const BANDWIDTH_UPDATE_MS = 700
+const BANDWIDTH_UPDATE_MS = 1000
 const LATENCY_BARS_UPDATE_MS = 1000
+const HISTORY_POINT_UPDATE_MS = 1000
+const ADAPTIVE_QOS_ICON_CYCLE_MS = 900
 const LATENCY_BAR_TARGET_MS = 100
 const LATENCY_BAR_MAX_MS = 150
 const QOS_CYCLE_MS = 1000
 const QOS_ACTIVE_MS = 500
-const QOS_PROFILE_SWITCH_MS = 700
+const QOS_PROFILE_SWITCH_MS = 1000
 const UPLOAD_PEAK_OFFSET_MS = 100
 const UPLOAD_DURATION_MS = 220
 const DL_RESPONSE_DELAY_MS = 140
@@ -2056,22 +2154,91 @@ function useThrottledValue<T>(value: T, intervalMS: number) {
   return throttled
 }
 
-function useImageSequenceFrame(frameCount: number, running: boolean, intervalMS: number) {
+function useImageSequenceFrame(frameCount: number, enabled: boolean, sourceKey: string | undefined, triggerKey: string | undefined, intervalMS: number) {
   const [frameIndex, setFrameIndex] = useState(0)
+  const [started, setStarted] = useState(false)
+  const startedRef = useRef(false)
+  const activeSourceRef = useRef<string | undefined>(undefined)
+  const timerRef = useRef<number | undefined>(undefined)
+  const stateTimerRef = useRef<number | undefined>(undefined)
 
   useEffect(() => {
-    if (!running || frameCount <= 1) {
+    return () => {
+      if (timerRef.current !== undefined) {
+        window.clearInterval(timerRef.current)
+      }
+      if (stateTimerRef.current !== undefined) {
+        window.clearTimeout(stateTimerRef.current)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    if (stateTimerRef.current !== undefined) {
+      window.clearTimeout(stateTimerRef.current)
+      stateTimerRef.current = undefined
+    }
+
+    if (!enabled || frameCount <= 1 || !sourceKey) {
+      activeSourceRef.current = undefined
+      startedRef.current = false
+      stateTimerRef.current = window.setTimeout(() => {
+        setStarted(false)
+        setFrameIndex(0)
+      }, 0)
       return
     }
 
-    const timer = window.setInterval(() => {
+    if (activeSourceRef.current !== sourceKey) {
+      activeSourceRef.current = sourceKey
+      startedRef.current = false
+    }
+
+    if (triggerKey && !startedRef.current) {
+      startedRef.current = true
+      stateTimerRef.current = window.setTimeout(() => {
+        setStarted(true)
+        setFrameIndex((current) => (current === 0 ? 1 % frameCount : current % frameCount))
+      }, 0)
+    } else if (!startedRef.current) {
+      stateTimerRef.current = window.setTimeout(() => {
+        setStarted(false)
+        setFrameIndex(0)
+      }, 0)
+    }
+  }, [enabled, frameCount, sourceKey, triggerKey])
+
+  useEffect(() => {
+    if (timerRef.current !== undefined) {
+      window.clearInterval(timerRef.current)
+      timerRef.current = undefined
+    }
+
+    if (!enabled || !started || frameCount <= 1) {
+      return
+    }
+
+    timerRef.current = window.setInterval(() => {
       setFrameIndex((current) => (current + 1) % frameCount)
     }, intervalMS)
+  }, [enabled, frameCount, intervalMS, started])
 
-    return () => window.clearInterval(timer)
-  }, [frameCount, intervalMS, running])
+  return {
+    frameIndex: enabled && started && frameCount > 0 ? frameIndex % frameCount : 0,
+    started,
+  }
+}
 
-  return running && frameCount > 0 ? frameIndex % frameCount : 0
+function imagePlaybackIntervalForStatus(status?: DemoUserStatus) {
+  switch (status) {
+    case 'delayed':
+      return 650
+    case 'high':
+    case 'failed':
+      return 1000
+    default:
+      return 300
+  }
 }
 
 function formatMbps(value: number) {
@@ -2642,14 +2809,18 @@ function treatmentCounts(users: DemoUser[]) {
   )
 }
 
-function makeDeviceCardView(user: DemoUser, latestResult: UploadResult | undefined, latencyHistory: number[]): DeviceCardView {
+function makeDeviceCardView(user: DemoUser, strategy: StrategyName, demoRunning: boolean, latestResult: UploadResult | undefined, latencyHistory: number[]): DeviceCardView {
   const online = isUserOnline(user)
-  const displayStatus = displayStatusForUser(user, latestResult)
-  const displayLatencyMS = latestResult?.latency_ms ?? user.last_latency_ms ?? 0
-  const treatmentClass = user.treatment === 'temporary_grant' ? 'treatment-temporary' : user.treatment === 'reserved' ? 'treatment-reserved' : 'treatment-public'
+  const effectsReady = demoRunning && isUserReadyForEffects(user)
+  const displayStatus = effectsReady ? displayStatusForUser(user, latestResult) : online ? 'idle' : 'planned'
+  const displayLatencyMS = effectsReady ? latestResult?.latency_ms ?? user.last_latency_ms ?? 0 : 0
+  const treatmentClass = effectsReady ? user.treatment === 'temporary_grant' ? 'treatment-temporary' : user.treatment === 'reserved' ? 'treatment-reserved' : 'treatment-public' : 'treatment-public'
+  const qosIcon = qosIconForUser(user, strategy)
+  const qosCycleDelayMS = qosIcon === 'dynamic-cycle' ? qosCycleDelayForUser(user) : 0
   const label = ueShortLabel(user)
-  const outcome = aiOutcomeForStatus(displayStatus, user.uploading)
+  const outcome = effectsReady ? aiOutcomeForStatus(displayStatus, user.uploading) : { label: online ? 'Waiting' : 'Offline', tone: 'waiting' }
   const latencyText = displayLatencyMS > 0 ? formatLatency(displayLatencyMS) : online ? 'Waiting' : '--'
+  const effectsActive = effectsReady && displayLatencyMS > 0 && outcome.tone !== 'waiting'
 
   return {
     user,
@@ -2658,11 +2829,49 @@ function makeDeviceCardView(user: DemoUser, latestResult: UploadResult | undefin
     displayStatus,
     displayLatencyMS,
     treatmentClass,
+    qosIcon,
+    qosCycleDelayMS,
+    effectsReady,
+    effectsActive,
     outcome,
     latencyText,
-    accessibleLabel: `${label}, ${outcome.label}, ${latencyText}, Dynamic QoS`,
+    accessibleLabel: `${label}, ${outcome.label}, ${latencyText}, ${qosIconLabel(qosIcon)}`,
     latencyHistory,
   }
+}
+
+function qosIconForUser(user: DemoUser, strategy: StrategyName): DeviceCardView['qosIcon'] {
+  if (strategy === 'dynamic_qos') {
+    return 'dynamic-cycle'
+  }
+  if (strategy === 'standard_gbr' && user.treatment === 'reserved') {
+    return 'gbr'
+  }
+  return 'none'
+}
+
+function isUserReadyForEffects(user: DemoUser) {
+  return user.active || user.uploading || user.running
+}
+
+function qosIconLabel(icon: DeviceCardView['qosIcon']) {
+  switch (icon) {
+    case 'dynamic-cycle':
+      return 'Adaptive QoS cycling'
+    case 'gbr':
+      return 'GBR QoS'
+    case 'none':
+    default:
+      return 'No QoS icon'
+  }
+}
+
+function qosCycleDelayForUser(user: DemoUser) {
+  let hash = user.index * 2654435761
+  for (let index = 0; index < user.client_id.length; index += 1) {
+    hash = Math.imul(hash ^ user.client_id.charCodeAt(index), 2246822519)
+  }
+  return Math.abs(hash) % ADAPTIVE_QOS_ICON_CYCLE_MS
 }
 
 function filterDeviceCards(cards: DeviceCardView[], filter: BoardFilter) {

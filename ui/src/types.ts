@@ -53,6 +53,7 @@ export interface DemoUser {
   active: boolean
   running: boolean
   uploading?: boolean
+  upload_started_at?: string
   attempts: number
   last_latency_ms?: number
   last_seen?: string
